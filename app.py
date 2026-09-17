@@ -5,7 +5,6 @@ import io
 import re
 import requests
 import pypdf
-from datetime import datetime
 from bs4 import BeautifulSoup
 from google import genai
 from reportlab.lib.pagesizes import letter
@@ -19,7 +18,7 @@ st.set_page_config(page_title="Utah Wildlife Board Bingo", layout="centered")
 
 UTAH_MEETINGS_URL = "https://wildlife.utah.gov/meetings"
 
-# --- CORE PUBLIC BOARD TROPES ---
+# --- CORE HARDCODED TROPES ---
 HARDCODED_CORE_TROPES = [
     "\"Can you hear me now?\"",
     "<b>Interrupted mid-sentence</b>",
@@ -105,89 +104,65 @@ if "GEMINI_API_KEY" not in st.secrets:
     st.error("Missing Gemini API Key in Streamlit Secrets!")
     st.stop()
 
-# Helper function to extract and convert dates to datetime objects for sorting
-def parse_date_to_sortable(text):
-    # Search for dates like "Jan 15, 2026", "September 8, 2025", "09/15/2026"
-    match = re.search(
-        r'(?:\b(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*\s+\d{1,2}(?:st|nd|rd|th)?,?\s*(?:\d{4})?)|'
-        r'(?:\d{1,2}[-/\.]\d{1,2}[-/\.]\d{2,4})', 
-        text, 
-        re.IGNORECASE
-    )
+# Flexibly extract date text or region context from surrounding HTML
+def extract_flexible_date(text_context):
+    # Regex pattern to grab months, days, years, or multi-day ranges (e.g. Sept 10-15, 2026)
+    pattern = r'(?:\b(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*\s+\d{1,2}(?:\s*[-–&]\s*\d{1,2})?,?\s*(?:\d{4})?)|(?:\d{1,2}[-/\.]\d{1,2}[-/\.]\d{2,4})'
+    match = re.search(pattern, text_context, re.IGNORECASE)
     if match:
-        date_str = match.group(0).strip()
-        # Clean ordinal suffixes (e.g. 15th -> 15)
-        clean_str = re.sub(r'(\d+)(st|nd|rd|th)', r'\1', date_str)
-        
-        # Try common datetime patterns
-        for fmt in ("%b %d, %Y", "%b %d %Y", "%B %d, %Y", "%B %d %Y", "%m/%d/%Y", "%m-%d-%Y", "%b %d", "%B %d"):
-            try:
-                parsed_dt = datetime.strptime(clean_str, fmt)
-                # If year wasn't specified, assume current year (2026)
-                if parsed_dt.year == 1900:
-                    parsed_dt = parsed_dt.replace(year=2026)
-                return parsed_dt, parsed_dt.strftime("%b %d, %Y")
-            except ValueError:
-                continue
-                
-    return datetime(1970, 1, 1), text[:35] if text else "Upcoming Meeting"
+        return match.group(0).strip()
+    return None
 
-# 1. DATE-FIRST SCRAPER WITH SORTING (Newest to Oldest)
+# 1. DOCUMENT-FIRST SCRAPER WORKFLOW
 @st.cache_data(ttl=43200)
-def discover_utah_docs_by_date():
+def discover_all_meeting_documents():
     headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
-    temp_grouped = {}
+    documents_map = {}
     
     try:
         response = requests.get(UTAH_MEETINGS_URL, headers=headers, timeout=10)
         if response.status_code == 200:
             soup = BeautifulSoup(response.content, "html.parser")
-            containers = soup.find_all(["tr", "li", "p", "div"])
             
-            for container in containers:
-                container_text = container.text.strip()
-                parsed_dt, display_date = parse_date_to_sortable(container_text)
+            # Find all PDF links on the page
+            for a_tag in soup.find_all("a", href=True):
+                href = a_tag["href"]
+                href_lower = href.lower()
+                link_text = a_tag.text.strip()
                 
-                pdf_links = container.find_all("a", href=True)
-                for a_tag in pdf_links:
-                    href = a_tag["href"]
-                    href_lower = href.lower()
-                    link_text = a_tag.text.strip().lower()
+                if href_lower.endswith(".pdf"):
+                    full_url = href if href.startswith("http") else f"https://wildlife.utah.gov{href}"
                     
-                    if href_lower.endswith(".pdf"):
-                        full_url = href if href.startswith("http") else f"https://wildlife.utah.gov{href}"
+                    # Look at immediate parent container and preceding headings for date clues
+                    parent = a_tag.find_parent(["tr", "li", "p", "div"])
+                    parent_text = parent.text.strip() if parent else ""
+                    heading = a_tag.find_previous(["h2", "h3", "h4"])
+                    heading_text = heading.text.strip() if heading else ""
+                    
+                    # Combine context to find date
+                    combined_context = f"{link_text} {parent_text} {heading_text} {href}"
+                    detected_date = extract_flexible_date(combined_context)
+                    
+                    # Determine Document Label
+                    doc_label = link_text if len(link_text) > 4 else "Meeting PDF"
+                    
+                    # Construct clean display key for the dropdown
+                    if detected_date:
+                        display_key = f"📅 {detected_date} — {doc_label}"
+                    elif heading_text:
+                        display_key = f"📌 {heading_text[:30]} — {doc_label}"
+                    else:
+                        display_key = f"📄 {doc_label}"
                         
-                        doc_type = "Agenda"
-                        if "packet" in href_lower or "packet" in link_text:
-                            doc_type = "Packet"
-                        elif "feedback" in href_lower or "feedback" in link_text:
-                            doc_type = "Feedback"
-
-                        if parsed_dt not in temp_grouped:
-                            temp_grouped[parsed_dt] = {
-                                "display_name": display_date,
-                                "files": {}
-                            }
-                        
-                        temp_grouped[parsed_dt]["files"][doc_type] = full_url
+                    documents_map[display_key] = full_url
 
     except Exception:
         pass
     
-    # Sort dates in descending order (Newest to Oldest)
-    sorted_dates = sorted(temp_grouped.keys(), reverse=True)
-    
-    final_grouped = {}
-    for dt in sorted_dates:
-        display_label = temp_grouped[dt]["display_name"]
-        final_grouped[display_label] = temp_grouped[dt]["files"]
-
-    if not final_grouped:
-        final_grouped["Utah Wildlife Board Schedule"] = {
-            "Agenda": "https://wildlife.utah.gov/pdf/meetings/2026_schedule.pdf"
-        }
+    if not documents_map:
+        documents_map["📅 Current Meeting Schedule — Agenda PDF"] = "https://wildlife.utah.gov/pdf/meetings/2026_schedule.pdf"
         
-    return final_grouped
+    return documents_map
 
 def download_pdf_bytes(pdf_url):
     headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
@@ -297,7 +272,7 @@ def create_multi_card_pdf(matrices_list, doc_title):
 
         story.append(Paragraph("<b>UTAH WILDLIFE BOARD BINGO</b>", title_style))
         story.append(Spacer(1, 4))
-        story.append(Paragraph(f"Mark each square live during the meeting. • Meeting Date: {doc_title} • Card #{card_idx + 1} of {total_cards}", subtitle_style))
+        story.append(Paragraph(f"Mark each square live during the meeting. • Source: {doc_title[:45]} • Card #{card_idx + 1} of {total_cards}", subtitle_style))
         story.append(Spacer(1, 10))
         story.append(table)
         story.append(Spacer(1, 8))
@@ -311,68 +286,58 @@ def create_multi_card_pdf(matrices_list, doc_title):
     return buffer
 
 # --- UI LAYOUT ---
-grouped_docs = discover_utah_docs_by_date()
+doc_options = discover_all_meeting_documents()
 
 c1, c2 = st.columns([4, 1])
 with c1:
-    st.subheader("1. Select Meeting Date")
+    st.subheader("1. Select Meeting Document")
 with c2:
     if st.button("🔄 Refresh"):
         st.cache_data.clear()
         st.rerun()
 
-# Sorted Date Selection Dropdown (Newest to Oldest)
-selected_date = st.selectbox("Choose meeting date (newest first):", list(grouped_docs.keys()))
+# Dropdown showing every discovered document with inferred date/heading
+selected_doc_title = st.selectbox("Choose a meeting document from Utah DWR:", list(doc_options.keys()))
+selected_pdf_url = doc_options[selected_doc_title]
 
-# Filter available source files ONLY for the selected date
-available_files = grouped_docs[selected_date]
+st.subheader("2. Source Document Download")
+pdf_bytes = download_pdf_bytes(selected_pdf_url)
 
-st.subheader(f"2. Available Source Documents for {selected_date}")
-cols = st.columns(3)
-
-file_texts = []
-for idx, doc_type in enumerate(["Agenda", "Packet", "Feedback"]):
-    with cols[idx]:
-        if doc_type in available_files:
-            file_bytes = download_pdf_bytes(available_files[doc_type])
-            if file_bytes:
-                st.download_button(
-                    label=f"📥 Download {doc_type}",
-                    data=file_bytes,
-                    file_name=f"{selected_date}_{doc_type}.pdf",
-                    mime="application/pdf"
-                )
-                text_content = extract_pdf_text_from_bytes(file_bytes)
-                if text_content:
-                    file_texts.append(f"--- {doc_type.upper()} CONTENT ---\n" + text_content)
-        else:
-            st.info(f"No {doc_type} PDF")
+if pdf_bytes:
+    st.download_button(
+        label="📥 Download Original PDF",
+        data=pdf_bytes,
+        file_name="selected_utah_dwr_document.pdf",
+        mime="application/pdf"
+    )
+    document_text = extract_pdf_text_from_bytes(pdf_bytes)
+else:
+    document_text = ""
+    st.info("Could not fetch document preview.")
 
 # Fallback Upload Option
 with st.expander("➕ Optional: Add Local Agenda PDF"):
-    custom_pdf = st.file_uploader("Upload a local PDF file", type=["pdf"])
+    custom_pdf = st.file_uploader("Upload a local PDF file instead", type=["pdf"])
     if custom_pdf:
         custom_text = extract_pdf_text_from_bytes(custom_pdf.read())
         if custom_text:
-            file_texts.append("--- CUSTOM PDF CONTENT ---\n" + custom_text)
-            st.success("Custom PDF added!")
-
-combined_date_text = "\n\n".join(file_texts)
+            document_text = custom_text
+            st.success("Custom PDF loaded as primary source!")
 
 st.subheader("3. Card Quantity")
 num_cards = st.number_input("How many unique Bingo cards do you want to generate?", min_value=1, max_value=20, value=1, step=1)
 
 # Generation Action
 if st.button("🎲 Generate Bingo Cards", type="primary"):
-    with st.spinner(f"Extracting topics for meeting on {selected_date} and generating {num_cards} card(s)..."):
+    with st.spinner("Extracting topics from document and generating card(s)..."):
         try:
             client = genai.Client(api_key=st.secrets["GEMINI_API_KEY"])
 
             prompt = f"""
             You are generating bingo cards for Utah Wildlife Board and Regional Advisory Council (RAC) meetings.
-            Analyze this text extracted from the selected meeting documents ({selected_date}):
+            Analyze this text extracted from the selected meeting document ({selected_doc_title}):
             
-            {combined_date_text[:5000]}
+            {document_text[:5000]}
 
             Generate EXACTLY 16 VERY SPECIFIC topics, species names, regulation proposals, or public comment tropes directly mentioned in the text above (max 2-4 words each).
             
@@ -437,7 +402,7 @@ if st.button("🎲 Generate Bingo Cards", type="primary"):
                 generated_matrices.append(matrix)
 
             st.session_state["matrices"] = generated_matrices
-            st.session_state["selected_date"] = selected_date
+            st.session_state["selected_doc"] = selected_doc_title
             st.session_state["card_count"] = card_count_int
 
         except Exception as e:
@@ -447,7 +412,7 @@ if st.button("🎲 Generate Bingo Cards", type="primary"):
 if "matrices" in st.session_state and st.session_state["matrices"]:
     card_count_int = st.session_state["card_count"]
     generated_matrices = st.session_state["matrices"]
-    doc_date = st.session_state["selected_date"]
+    doc_title = st.session_state["selected_doc"]
 
     st.success(f"{card_count_int} Bingo Card(s) Ready!")
 
@@ -465,10 +430,10 @@ if "matrices" in st.session_state and st.session_state["matrices"]:
 
     st.markdown("".join(html_grid), unsafe_allow_html=True)
 
-    pdf_data = create_multi_card_pdf(generated_matrices, doc_date)
+    pdf_data = create_multi_card_pdf(generated_matrices, doc_title)
     st.download_button(
         label=f"📄 Download Printable PDF ({card_count_int} Card{'s' if card_count_int > 1 else ''})",
         data=pdf_data,
-        file_name=f"utah_wildlife_bingo_{doc_date}.pdf",
+        file_name="utah_wildlife_bingo.pdf",
         mime="application/pdf"
     )
