@@ -198,9 +198,17 @@ def call_gemini_with_retry(client, prompt):
 
 def create_multi_card_pdf(matrices_list, doc_title):
     buffer = io.BytesIO()
+    
+    # Explicit float bounds to fix ReportLab calculation error on Python 3.14
+    page_width, page_height = float(letter[0]), float(letter[1])
+    
     doc = SimpleDocTemplate(
-        buffer, pagesize=letter,
-        rightMargin=51, leftMargin=51, topMargin=36, bottomMargin=36
+        buffer,
+        pagesize=(page_width, page_height),
+        rightMargin=51.0,
+        leftMargin=51.0,
+        topMargin=36.0,
+        bottomMargin=36.0
     )
     styles = getSampleStyleSheet()
 
@@ -354,17 +362,14 @@ if st.button("🎲 Generate Bingo Cards", type="primary"):
                     except Exception:
                         ai_phrases = []
 
-            # Combine current document AI phrases with historical feedback archive
             combined_feedback_pool = list(set(ai_phrases + HISTORICAL_FEEDBACK_ARCHIVE))
             
             generated_matrices = []
             card_count_int = int(num_cards)
 
             for i in range(card_count_int):
-                # Pick 8 guaranteed core tropes
                 selected_core = list(HARDCODED_CORE_TROPES)
                 
-                # Sample 16 randomized items from the combined feedback pool
                 needed_feedback = 16
                 if len(combined_feedback_pool) >= needed_feedback:
                     selected_feedback = random.sample(combined_feedback_pool, needed_feedback)
@@ -373,7 +378,6 @@ if st.button("🎲 Generate Bingo Cards", type="primary"):
                     while len(selected_feedback) < needed_feedback:
                         selected_feedback.append(random.choice(HISTORICAL_FEEDBACK_ARCHIVE))
 
-                # Combine core tropes + randomized feedback comments and shuffle layout
                 card_pool = selected_core + selected_feedback
                 random.shuffle(card_pool)
 
