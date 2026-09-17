@@ -2,6 +2,7 @@ import streamlit as st
 import json
 import random
 import io
+import re
 import requests
 import pypdf
 from bs4 import BeautifulSoup
@@ -17,7 +18,7 @@ st.set_page_config(page_title="Utah Wildlife Board Bingo", layout="centered")
 
 UTAH_MEETINGS_URL = "https://wildlife.utah.gov/meetings"
 
-# --- HARDCODED TROPES ---
+# --- CORE PUBLIC BOARD TROPES ---
 HARDCODED_CORE_TROPES = [
     "\"Can you hear me now?\"",
     "<b>Interrupted mid-sentence</b>",
@@ -103,7 +104,19 @@ if "GEMINI_API_KEY" not in st.secrets:
     st.error("Missing Gemini API Key in Streamlit Secrets!")
     st.stop()
 
-# 1. SCRAPER WITH CACHING & CLEAR BUTTON
+# Helper function to extract or clean date titles
+def extract_date_title(text, parent_text):
+    date_match = re.search(r'(?:\b(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*\s+\d{1,2}(?:st|nd|rd|th)?,?\s+\d{4})|(?:\d{4}[-_\.]\d{2}[-_\.]\d{2})|(?:\d{1,2}[-_\.]\d{1,2}[-_\.]\d{2,4})', f"{text} {parent_text}", re.IGNORECASE)
+    if date_match:
+        return date_match.group(0)
+    
+    # Clean fallback title from parent text
+    clean_parent = re.sub(r'\s+', ' ', parent_text).strip()
+    if len(clean_parent) > 5 and len(clean_parent) < 60:
+        return clean_parent
+    return "Upcoming / General Meetings"
+
+# 1. DATE-STRICT SCRAPER
 @st.cache_data(ttl=43200)
 def discover_utah_docs_by_date():
     headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
@@ -131,20 +144,17 @@ def discover_utah_docs_by_date():
                     parent_element = a_tag.find_parent(["tr", "li", "p", "div"])
                     parent_text = parent_element.text.strip() if parent_element else ""
                     
-                    title = text if len(text) > 8 else parent_text[:60]
-                    title = title.replace("\n", " ").replace("\r", "").strip()
-                    if not title or len(title) < 5:
-                        title = href.split("/")[-1]
-                        
-                    if title not in grouped_dates:
-                        grouped_dates[title] = {}
-                    grouped_dates[title][doc_type] = full_url
+                    date_key = extract_date_title(text, parent_text)
+                    
+                    if date_key not in grouped_dates:
+                        grouped_dates[date_key] = {}
+                    grouped_dates[date_key][doc_type] = full_url
 
     except Exception:
         pass
     
     if not grouped_dates:
-        grouped_dates["Utah Wildlife Board & RAC Agendas"] = {
+        grouped_dates["Utah Wildlife Board Schedule"] = {
             "Agenda": "https://wildlife.utah.gov/pdf/meetings/2026_schedule.pdf"
         }
         
@@ -258,7 +268,7 @@ def create_multi_card_pdf(matrices_list, doc_title):
 
         story.append(Paragraph("<b>UTAH WILDLIFE BOARD BINGO</b>", title_style))
         story.append(Spacer(1, 4))
-        story.append(Paragraph(f"Mark each square live during the meeting. • Meeting: {doc_title[:45]} • Card #{card_idx + 1} of {total_cards}", subtitle_style))
+        story.append(Paragraph(f"Mark each square live during the meeting. • Date: {doc_title[:45]} • Card #{card_idx + 1} of {total_cards}", subtitle_style))
         story.append(Spacer(1, 10))
         story.append(table)
         story.append(Spacer(1, 8))
@@ -271,24 +281,28 @@ def create_multi_card_pdf(matrices_list, doc_title):
     buffer.seek(0)
     return buffer
 
-# UI Setup
+# --- UI LAYOUT ---
 grouped_docs = discover_utah_docs_by_date()
 
 c1, c2 = st.columns([4, 1])
 with c1:
-    st.subheader("1. Select Meeting / Document Date")
+    st.subheader("1. Explore Documents by Meeting Date")
 with c2:
     if st.button("🔄 Refresh"):
         st.cache_data.clear()
         st.rerun()
 
-selected_date = st.selectbox("Choose meeting document:", list(grouped_docs.keys()))
+# Date Selection Dropdown
+selected_date = st.selectbox("Select a meeting date:", list(grouped_docs.keys()))
+
+# Filter available files ONLY for the selected date
 available_files = grouped_docs[selected_date]
 
-st.subheader("2. Source Documents")
+st.subheader(f"2. Source Documents for {selected_date}")
 cols = st.columns(3)
 
 file_texts = []
+# Display download buttons strictly belonging to the selected date
 for idx, doc_type in enumerate(["Agenda", "Packet", "Feedback"]):
     with cols[idx]:
         if doc_type in available_files:
@@ -297,7 +311,7 @@ for idx, doc_type in enumerate(["Agenda", "Packet", "Feedback"]):
                 st.download_button(
                     label=f"📥 Download {doc_type}",
                     data=file_bytes,
-                    file_name=f"{doc_type}.pdf",
+                    file_name=f"{selected_date}_{doc_type}.pdf",
                     mime="application/pdf"
                 )
                 text_content = extract_pdf_text_from_bytes(file_bytes)
@@ -306,23 +320,23 @@ for idx, doc_type in enumerate(["Agenda", "Packet", "Feedback"]):
         else:
             st.info(f"No {doc_type} PDF")
 
-# Fallback Manual Upload
-with st.expander("➕ Optional: Upload Custom Agenda PDF"):
+# Fallback Upload Option
+with st.expander("➕ Optional: Add Local Agenda PDF"):
     custom_pdf = st.file_uploader("Upload a local PDF file", type=["pdf"])
     if custom_pdf:
         custom_text = extract_pdf_text_from_bytes(custom_pdf.read())
         if custom_text:
             file_texts.append("--- CUSTOM PDF CONTENT ---\n" + custom_text)
-            st.success("Custom PDF added to analysis!")
+            st.success("Custom PDF added!")
 
 combined_date_text = "\n\n".join(file_texts)
 
 st.subheader("3. Card Quantity")
 num_cards = st.number_input("How many unique Bingo cards do you want to generate?", min_value=1, max_value=20, value=1, step=1)
 
-# Generation Logic with Session State
+# Generation Action
 if st.button("🎲 Generate Bingo Cards", type="primary"):
-    with st.spinner(f"Extracting meeting topics and generating {num_cards} card(s)..."):
+    with st.spinner(f"Extracting topics for {selected_date} and generating {num_cards} card(s)..."):
         try:
             client = genai.Client(api_key=st.secrets["GEMINI_API_KEY"])
 
@@ -394,7 +408,6 @@ if st.button("🎲 Generate Bingo Cards", type="primary"):
                     matrix.append(row)
                 generated_matrices.append(matrix)
 
-            # Store in session state
             st.session_state["matrices"] = generated_matrices
             st.session_state["selected_date"] = selected_date
             st.session_state["card_count"] = card_count_int
@@ -402,7 +415,7 @@ if st.button("🎲 Generate Bingo Cards", type="primary"):
         except Exception as e:
             st.error(f"Something went wrong: {e}")
 
-# Render Results if Session State Exists
+# Render Saved Preview & PDF Output
 if "matrices" in st.session_state and st.session_state["matrices"]:
     card_count_int = st.session_state["card_count"]
     generated_matrices = st.session_state["matrices"]
@@ -428,6 +441,6 @@ if "matrices" in st.session_state and st.session_state["matrices"]:
     st.download_button(
         label=f"📄 Download Printable PDF ({card_count_int} Card{'s' if card_count_int > 1 else ''})",
         data=pdf_data,
-        file_name="utah_wildlife_bingo.pdf",
+        file_name=f"utah_wildlife_bingo_{doc_date}.pdf",
         mime="application/pdf"
     )
