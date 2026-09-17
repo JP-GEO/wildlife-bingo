@@ -19,7 +19,7 @@ st.set_page_config(page_title="Utah Wildlife Board Bingo", layout="centered")
 
 UTAH_MEETINGS_URL = "https://wildlife.utah.gov/meetings"
 
-# --- CORE PUBLIC BOARD TROPES (Guaranteed across cards, positioned randomly) ---
+# --- CORE PUBLIC BOARD TROPES ---
 CORE_BOARD_TROPES = [
     "\"Can you hear me now?\"",
     "<b>Interrupted mid-sentence</b>",
@@ -90,7 +90,7 @@ def extract_date_from_string(text):
     date_match = re.search(r'(?:\b(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*\s+\d{1,2}(?:st|nd|rd|th)?,?\s+\d{4})|(?:\d{4}[-_\.]\d{2}[-_\.]\d{2})|(?:\d{1,2}[-_\.]\d{1,2}[-_\.]\d{2,4})', text, re.IGNORECASE)
     return date_match.group(0) if date_match else "Upcoming / General Meetings"
 
-# Helper function to extract YouTube video transcripts
+# Safe YouTube transcript extractor
 def get_youtube_transcript(yt_url):
     try:
         yt_id = None
@@ -101,13 +101,19 @@ def get_youtube_transcript(yt_url):
             
         if yt_id:
             transcript_list = YouTubeTranscriptApi.get_transcript(yt_id)
-            raw_lines = [item['text'] for item in transcript_list[:150]] # First ~5 minutes
-            return " ".join(raw_lines)
+            if transcript_list and isinstance(transcript_list, list):
+                # Safely slice and extract 'text'
+                max_items = min(len(transcript_list), 150)
+                raw_lines = [
+                    item['text'] for item in transcript_list[:max_items] 
+                    if isinstance(item, dict) and 'text' in item
+                ]
+                return " ".join(raw_lines)
     except Exception:
         pass
     return ""
 
-# 1. SCRAPER FOR PDFs, HTML TEXT, AND YOUTUBE TRANSCRIPTS
+# Scraper for PDFs, HTML Text, and YouTube Transcripts
 @st.cache_data(ttl=43200)
 def discover_utah_docs_by_date():
     headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
@@ -118,14 +124,14 @@ def discover_utah_docs_by_date():
         if response.status_code == 200:
             soup = BeautifulSoup(response.content, "html.parser")
             
-            # Scrape HTML page text & table contents
+            # Scrape HTML page text
             page_text = ""
             for element in soup.find_all(['h1', 'h2', 'h3', 'p', 'li', 'td']):
                 txt = element.text.strip()
                 if len(txt) > 5:
                     page_text += txt + "\n"
 
-            # Check for YouTube links
+            # Check for YouTube links safely
             yt_transcript = ""
             for a_tag in soup.find_all("a", href=True):
                 href = a_tag["href"]
@@ -316,7 +322,6 @@ for idx, doc_type in enumerate(["Agenda", "Packet", "Feedback"]):
         else:
             st.info(f"No {doc_type} PDF")
 
-# Add HTML page text and YouTube transcripts to context
 if date_data.get("html_context"):
     file_texts.append("--- WEBSITE PAGE CONTENT ---\n" + date_data["html_context"])
 if date_data.get("yt_transcript"):
