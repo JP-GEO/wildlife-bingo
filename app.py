@@ -2,6 +2,7 @@ import streamlit as st
 import json
 import random
 import io
+import re
 import requests
 import pypdf
 from bs4 import BeautifulSoup
@@ -96,39 +97,58 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 st.title("🏔️ Utah Wildlife Board Bingo")
-st.write("Generates instant 5x5 Bingo cards using official meeting agendas from Utah DWR.")
+st.write("Generates instant 5x5 Bingo cards using official meeting agendas and packets from Utah DWR.")
 
 # API Key Check
 if "GEMINI_API_KEY" not in st.secrets:
     st.error("Missing Gemini API Key in Streamlit Secrets!")
     st.stop()
 
-# 1. SCRAPE ALL AVAILABLE MEETING DOCS (Cached 12 hrs)
+# Helper function to extract dates from text or URLs
+def extract_date_from_string(text):
+    # Regex to catch dates like "Sept 15, 2026", "09-15-2026", "2026_09_15"
+    date_match = re.search(r'(?:\b(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*\s+\d{1,2}(?:st|nd|rd|th)?,?\s+\d{4})|(?:\d{4}[-_\.]\d{2}[-_\.]\d{2})|(?:\d{1,2}[-_\.]\d{1,2}[-_\.]\d{2,4})', text, re.IGNORECASE)
+    if date_match:
+        return date_match.group(0)
+    return "Upcoming / Undated"
+
+# 1. FILTERED & DATE-GROUPED SCRAPER (Cached 12 hrs)
 @st.cache_data(ttl=43200)
-def discover_utah_docs():
-    """Finds all available PDF agendas and packets on wildlife.utah.gov/meetings."""
+def discover_utah_docs_grouped():
+    """Scrapes PDF links containing agenda, packet, or feedback, grouped by date."""
     headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
-    doc_map = {}
+    grouped_docs = {}
+    target_keywords = ["agenda", "packet", "feedback"]
+    
     try:
         response = requests.get(UTAH_MEETINGS_URL, headers=headers, timeout=10)
         if response.status_code == 200:
             soup = BeautifulSoup(response.content, "html.parser")
             for a_tag in soup.find_all("a", href=True):
-                href = a_tag["href"]
+                href = a_tag["href"].lower()
                 text = a_tag.text.strip()
-                if href.endswith(".pdf") and len(text) > 3:
-                    full_url = href if href.startswith("http") else f"https://wildlife.utah.gov{href}"
-                    doc_map[f"{text}"] = full_url
+                combined_target = f"{href} {text.lower()}"
+                
+                # Check 1: Must be a PDF file
+                # Check 2: Must contain agenda, packet, or feedback in title or link
+                if href.endswith(".pdf") and any(kw in combined_target for kw in target_keywords):
+                    full_url = a_tag["href"] if a_tag["href"].startswith("http") else f"https://wildlife.utah.gov{a_tag['href']}"
+                    
+                    # Extract date from link or surrounding context
+                    parent_text = a_tag.parent.text if a_tag.parent else ""
+                    detected_date = extract_date_from_string(f"{text} {parent_text} {href}")
+                    
+                    display_title = f"📅 [{detected_date}] - {text}"
+                    grouped_docs[display_title] = full_url
     except Exception:
         pass
     
-    # Default fallback if scraping encounters an issue
-    if not doc_map:
-        doc_map["Default Utah Board Agenda"] = "https://wildlife.utah.gov/pdf/meetings/2026_schedule.pdf"
+    if not grouped_docs:
+        grouped_docs["📅 [Default] - Utah Board Agenda"] = "https://wildlife.utah.gov/pdf/meetings/2026_schedule.pdf"
         
-    return doc_map
+    return grouped_docs
 
-# Helper function to download and extract text from selected PDF
+# Extract text from selected PDF
 def extract_pdf_text(pdf_url):
     headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
     try:
@@ -137,7 +157,7 @@ def extract_pdf_text(pdf_url):
         reader = pypdf.PdfReader(pdf_file)
         
         extracted_text = ""
-        max_pages = min(len(reader.pages), 5) # Read first 5 pages max
+        max_pages = min(len(reader.pages), 5)
         for i in range(max_pages):
             text = reader.pages[i].extract_text()
             if text:
@@ -146,7 +166,7 @@ def extract_pdf_text(pdf_url):
     except Exception:
         return ""
 
-# 2. RETRY WRAPPER FOR GEMINI
+# Retry Wrapper for Gemini API
 @retry(
     wait=wait_random_exponential(min=1, max=10),
     stop=stop_after_attempt(3),
@@ -158,7 +178,7 @@ def call_gemini_with_retry(client, prompt):
         contents=prompt,
     )
 
-# 3. MULTI-PAGE PRINTABLE PDF CREATOR
+# PDF Creator
 def create_multi_card_pdf(matrices_list, doc_title):
     buffer = io.BytesIO()
     doc = SimpleDocTemplate(
@@ -232,7 +252,7 @@ def create_multi_card_pdf(matrices_list, doc_title):
 
         story.append(Paragraph("<b>UTAH WILDLIFE BOARD BINGO</b>", title_style))
         story.append(Spacer(1, 4))
-        story.append(Paragraph(f"Mark each square live during the meeting. • Source: {doc_title[:50]} • Card #{card_idx + 1}", subtitle_style))
+        story.append(Paragraph(f"Mark each square live during the meeting. • Source: {doc_title[:55]} • Card #{card_idx + 1}", subtitle_style))
         story.append(Spacer(1, 12))
         story.append(table)
         story.append(Spacer(1, 10))
@@ -245,20 +265,20 @@ def create_multi_card_pdf(matrices_list, doc_title):
     buffer.seek(0)
     return buffer
 
-# Discover available docs from Utah DWR website
-available_docs = discover_utah_docs()
+# Discover filtered documents
+available_docs = discover_utah_docs_grouped()
 
-# UI Controls
-st.subheader("1. Select Active Document Source")
-selected_doc_name = st.selectbox("Choose meeting document to analyze:", list(available_docs.keys()))
+# UI Layout
+st.subheader("1. Select Meeting Document (Agendas, Packets & Feedback Only)")
+selected_doc_name = st.selectbox("Choose a date-grouped document:", list(available_docs.keys()))
 selected_doc_url = available_docs[selected_doc_name]
 
 st.subheader("2. Card Quantity")
-num_cards = st.number_input("How many unique Bingo cards do you want to print?", min_value=1, max_value=20, value=1, step=1)
+num_cards = st.number_input("How many unique Bingo cards do you want to generate?", min_value=1, max_value=20, value=1, step=1)
 
-# --- GENERATION TRIGGER ---
+# Generation Action
 if st.button("🎲 Generate Bingo Cards", type="primary"):
-    with st.spinner(f"Reading '{selected_doc_name}' and generating {num_cards} card(s)..."):
+    with st.spinner(f"Processing selected document and generating {num_cards} card(s)..."):
         try:
             doc_text = extract_pdf_text(selected_doc_url)
             client = genai.Client(api_key=st.secrets["GEMINI_API_KEY"])
@@ -271,7 +291,7 @@ if st.button("🎲 Generate Bingo Cards", type="primary"):
                 
                 {doc_text}
 
-                Generate EXACTLY 16 BROADER, SHORT, EASY-TO-TRIGGER phrases (max 2-4 words each) based on topics in this agenda or common public comment habits.
+                Generate EXACTLY 16 BROADER, SHORT, EASY-TO-TRIGGER phrases (max 2-4 words each) based on topics in this agenda/packet or common public comment habits.
                 
                 CRITICAL FORMATTING RULES:
                 1. If spoken/yelled out by a person, wrap in quotes: "Spoken Phrase"
