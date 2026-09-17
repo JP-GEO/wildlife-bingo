@@ -18,7 +18,7 @@ st.set_page_config(page_title="Utah Wildlife Board Bingo", layout="centered")
 
 UTAH_MEETINGS_URL = "https://wildlife.utah.gov/meetings"
 
-# --- GUARANTEED HARDCODED CORE TROPES (8 Total) ---
+# --- CORE HARDCODED PUBLIC BOARD TROPES (8 Guaranteed Items) ---
 HARDCODED_CORE_TROPES = [
     "\"Can you hear me now?\"",
     "<b>Interrupted mid-sentence</b>",
@@ -30,23 +30,24 @@ HARDCODED_CORE_TROPES = [
     "\"With all due respect...\""
 ]
 
-FALLBACK_AI_TROPES = [
-    "<b>I dont have those numbers</b>",
-    "\"I have a quick question\"",
-    "<b>Dog hunting debate</b>",
-    "<b>Public commenter over time</b>",
-    "<b>Slide deck unreadable</b>",
-    "\"Back in the good old days\"",
-    "<b>Bag limit adjustment</b>",
-    "<b>...family hunting anecdote...</b>",
-    "\"We need to look that up\"",
-    "<b>Boat ramp access fees</b>",
-    "<b>Dramatic sigh in mic</b>",
-    "\"I move to approve\"",
-    "<b>I second the motion</b>",
-    "\"Is this item open?\"",
-    "<b>Background *coughing*</b>",
-    "<b>Presenter mixes up their slides</b>"
+# --- ARCHIVED HISTORICAL PUBLIC FEEDBACK COMMENTS ---
+HISTORICAL_FEEDBACK_ARCHIVE = [
+    "\"Opposes tag reduction\"",
+    "<b>Archery optics debate</b>",
+    "<b>Wasatch elk permit dispute</b>",
+    "<b>Shed hunting fee objection</b>",
+    "<b>Cougar hound hunting argument</b>",
+    "\"Requests more youth tags\"",
+    "<b>Trail camera ban pushback</b>",
+    "<b>CWD management dispute</b>",
+    "<b>Water rights complaint</b>",
+    "\"I move to table this\"",
+    "<b>Non-resident quota debate</b>",
+    "<b>Walk-in access funding</b>",
+    "\"Public comment timer beep\"",
+    "<b>Over-grazing accusation</b>",
+    "<b>Private landowner tag dispute</b>",
+    "<b>Bighorn sheep buffer rule</b>"
 ]
 
 # High-contrast Black & White Styling
@@ -97,7 +98,7 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 st.title("🏔️ Utah Wildlife Board Bingo")
-st.write("Generates instant 5x5 Bingo cards using official meeting agendas from Utah DWR.")
+st.write("Generates randomized Bingo cards from current and historical DWR public comment feedback.")
 
 if "GEMINI_API_KEY" not in st.secrets:
     st.error("Missing Gemini API Key in Streamlit Secrets!")
@@ -110,10 +111,12 @@ def extract_flexible_date(text_context):
         return match.group(0).strip()
     return None
 
+# Scraper prioritizing Feedback, Public Comment, and RAC Summary Documents
 @st.cache_data(ttl=43200)
-def discover_agenda_documents_only():
+def discover_feedback_documents_only():
     headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
     documents_map = {}
+    target_keywords = ["feedback", "comment", "summary", "recommendations"]
     
     try:
         response = requests.get(UTAH_MEETINGS_URL, headers=headers, timeout=10)
@@ -128,7 +131,7 @@ def discover_agenda_documents_only():
                 
                 if href_lower.endswith(".pdf"):
                     combined_target = f"{href_lower} {link_text_lower}"
-                    if "agenda" in combined_target:
+                    if any(kw in combined_target for kw in target_keywords):
                         full_url = href if href.startswith("http") else f"https://wildlife.utah.gov{href}"
                         
                         parent = a_tag.find_parent(["tr", "li", "p", "div"])
@@ -139,10 +142,10 @@ def discover_agenda_documents_only():
                         combined_context = f"{link_text} {parent_text} {heading_text} {href}"
                         detected_date = extract_flexible_date(combined_context)
                         
-                        doc_label = link_text if len(link_text) > 3 else "Agenda PDF"
+                        doc_label = link_text if len(link_text) > 3 else "Public Feedback PDF"
                         
                         if detected_date:
-                            display_key = f"📅 {detected_date} — {doc_label}"
+                            display_key = f"💬 {detected_date} — {doc_label}"
                         elif heading_text:
                             display_key = f"📌 {heading_text[:30]} — {doc_label}"
                         else:
@@ -154,7 +157,7 @@ def discover_agenda_documents_only():
         pass
     
     if not documents_map:
-        documents_map["📅 Current Meeting — Agenda PDF"] = "https://wildlife.utah.gov/pdf/meetings/2026_schedule.pdf"
+        documents_map["💬 Public Feedback & RAC Summary PDF"] = "https://wildlife.utah.gov/pdf/meetings/2026_schedule.pdf"
         
     return documents_map
 
@@ -173,7 +176,6 @@ def extract_pdf_text_from_bytes(pdf_bytes):
         pdf_file = io.BytesIO(pdf_bytes)
         reader = pypdf.PdfReader(pdf_file)
         extracted_text = ""
-        # Scan up to 10 pages for comprehensive agenda context
         max_pages = min(len(reader.pages), 10)
         for i in range(max_pages):
             text = reader.pages[i].extract_text()
@@ -281,84 +283,68 @@ def create_multi_card_pdf(matrices_list, doc_title):
     return buffer
 
 # --- UI LAYOUT ---
-doc_options = discover_agenda_documents_only()
+doc_options = discover_feedback_documents_only()
 
 c1, c2 = st.columns([4, 1])
 with c1:
-    st.subheader("1. Select Agenda Document")
+    st.subheader("1. Select Feedback Document")
 with c2:
     if st.button("🔄 Refresh"):
         st.cache_data.clear()
         st.rerun()
 
-selected_doc_title = st.selectbox("Choose a meeting agenda from Utah DWR:", list(doc_options.keys()))
+selected_doc_title = st.selectbox("Choose a public feedback document from Utah DWR:", list(doc_options.keys()))
 selected_pdf_url = doc_options[selected_doc_title]
 
-st.subheader("2. Source Document Analysis")
+st.subheader("2. Source Feedback Document")
 pdf_bytes = download_pdf_bytes(selected_pdf_url)
 
 document_text = ""
 if pdf_bytes:
     st.download_button(
-        label="📥 Download Selected Agenda PDF",
+        label="📥 Download Selected Feedback PDF",
         data=pdf_bytes,
-        file_name="selected_utah_dwr_agenda.pdf",
+        file_name="selected_utah_dwr_feedback.pdf",
         mime="application/pdf"
     )
     document_text = extract_pdf_text_from_bytes(pdf_bytes)
 
-# Inspect extracted text snippet to verify AI inputs
-with st.expander("🔍 Inspect Extracted Agenda Text"):
-    if document_text.strip():
-        st.text_area("Parsed Text Preview (First 2000 chars):", document_text[:2000], height=150)
-    else:
-        st.warning("No readable text found in PDF. Try uploading a text-based PDF below.")
-
-with st.expander("➕ Optional: Add Local Agenda PDF"):
+with st.expander("➕ Optional: Add Custom Public Feedback PDF"):
     custom_pdf = st.file_uploader("Upload a local PDF file instead", type=["pdf"])
     if custom_pdf:
         custom_text = extract_pdf_text_from_bytes(custom_pdf.read())
         if custom_text:
             document_text = custom_text
-            st.success("Custom Agenda PDF loaded as primary source!")
+            st.success("Custom Feedback PDF loaded as primary source!")
 
 st.subheader("3. Card Quantity")
 num_cards = st.number_input("How many unique Bingo cards do you want to generate?", min_value=1, max_value=20, value=1, step=1)
 
 if st.button("🎲 Generate Bingo Cards", type="primary"):
-    if not document_text.strip():
-        st.error("Cannot generate cards: No text could be extracted from the selected agenda document!")
-    else:
-        with st.spinner("Extracting factual topics from agenda and generating card(s)..."):
-            try:
-                client = genai.Client(api_key=st.secrets["GEMINI_API_KEY"])
+    with st.spinner("Analyzing public comments and assembling randomized phrase pool..."):
+        try:
+            client = genai.Client(api_key=st.secrets["GEMINI_API_KEY"])
 
-                # Targeted prompt enforcing strict topic, species, and regulation extraction
+            ai_phrases = []
+            if document_text.strip():
                 prompt = f"""
-                You are generating dynamic bingo card phrases for a Utah Wildlife Board / Regional Advisory Council (RAC) meeting.
-                
-                Read this extracted meeting agenda carefully:
+                You are generating bingo cards for Utah Wildlife Board / RAC meetings.
+                Analyze this public comment feedback summary from Utah DWR:
+
                 ----------------------------------------
                 {document_text[:5000]}
                 ----------------------------------------
 
-                Extract EXACTLY 16 VERY SPECIFIC agenda items, species names, regulation proposals, rule numbers, presenter topics, or regional locations mentioned directly in the document text above.
-                
-                STRICT EXCLUSION RULES:
-                - DO NOT generate generic public comment clichés like "I disagree", "My family hunts here", or "Quick question".
-                - DO NOT generate generic meeting tropes. Focus 100% on the specific topics listed in this document (e.g., "Elk permit quotas", "CWD management plan", "R657 rule amendment", "Northern RAC recommendations", "Waterfowl bag limits").
+                Extract EXACTLY 20 SPECIFIC public complaints, debate topics, requested rule changes, or hot-button species issues mentioned directly in this feedback document (max 2-4 words each).
 
                 FORMATTING REQUIREMENTS:
-                - Every phrase MUST be 2 to 4 words max.
-                - Wrap every extracted topic in HTML bold tags: <b>Topic Name</b>
+                - If a spoken quote: "Spoken Quote"
+                - If a regulation/action topic: <b>Topic Name</b>
                 
-                Return ONLY a raw JSON array of 16 strings.
-                Example format: ["<b>Elk permit quotas</b>", "<b>CWD rule change</b>", "<b>Northern RAC vote</b>", "<b>Cougar permit limits</b>"]
+                Return ONLY a raw JSON array of 20 strings.
                 """
 
                 response = call_gemini_with_retry(client, prompt)
-                
-                ai_phrases = []
                 if response and hasattr(response, 'text') and response.text:
                     try:
                         raw_json = response.text.strip().replace("```json", "").replace("```", "")
@@ -368,54 +354,48 @@ if st.button("🎲 Generate Bingo Cards", type="primary"):
                     except Exception:
                         ai_phrases = []
 
-                ai_phrases = list(ai_phrases)
+            # Combine current document AI phrases with historical feedback archive
+            combined_feedback_pool = list(set(ai_phrases + HISTORICAL_FEEDBACK_ARCHIVE))
+            
+            generated_matrices = []
+            card_count_int = int(num_cards)
 
-                # Supplement with Utah-specific topics if agenda is brief
-                if len(ai_phrases) < 16:
-                    utah_specific_topics = [
-                        "<b>CWD management debate</b>", "<b>Big game permit quota</b>", 
-                        "<b>Water rights discussion</b>", "<b>RAC committee vote</b>", 
-                        "<b>Cougar hunting limits</b>", "<b>Shed hunting season rule</b>",
-                        "<b>Trail camera ban</b>", "<b>Conservation officer report</b>"
-                    ]
-                    for topic in utah_specific_topics:
-                        if topic not in ai_phrases:
-                            ai_phrases.append(topic)
-                        if len(ai_phrases) >= 16:
-                            break
+            for i in range(card_count_int):
+                # Pick 8 guaranteed core tropes
+                selected_core = list(HARDCODED_CORE_TROPES)
+                
+                # Sample 16 randomized items from the combined feedback pool
+                needed_feedback = 16
+                if len(combined_feedback_pool) >= needed_feedback:
+                    selected_feedback = random.sample(combined_feedback_pool, needed_feedback)
+                else:
+                    selected_feedback = list(combined_feedback_pool)
+                    while len(selected_feedback) < needed_feedback:
+                        selected_feedback.append(random.choice(HISTORICAL_FEEDBACK_ARCHIVE))
 
-                count_ai = int(len(ai_phrases))
-                if count_ai < 16:
-                    needed = 16 - count_ai
-                    ai_phrases.extend(FALLBACK_AI_TROPES[:needed])
+                # Combine core tropes + randomized feedback comments and shuffle layout
+                card_pool = selected_core + selected_feedback
+                random.shuffle(card_pool)
 
-                all_phrases_pool = list(HARDCODED_CORE_TROPES) + list(ai_phrases[:16])
+                matrix = []
+                idx = 0
+                for r in range(5):
+                    row = []
+                    for c in range(5):
+                        if r == 2 and c == 2:
+                            row.append("FREE SPACE")
+                        else:
+                            row.append(card_pool[idx])
+                            idx += 1
+                    matrix.append(row)
+                generated_matrices.append(matrix)
 
-                generated_matrices = []
-                card_count_int = int(num_cards)
-                for i in range(card_count_int):
-                    current_pool = list(all_phrases_pool)
-                    random.shuffle(current_pool)
-                    
-                    matrix = []
-                    idx = 0
-                    for r in range(5):
-                        row = []
-                        for c in range(5):
-                            if r == 2 and c == 2:
-                                row.append("FREE SPACE")
-                            else:
-                                row.append(current_pool[idx])
-                                idx += 1
-                        matrix.append(row)
-                    generated_matrices.append(matrix)
+            st.session_state["matrices"] = generated_matrices
+            st.session_state["selected_doc"] = selected_doc_title
+            st.session_state["card_count"] = card_count_int
 
-                st.session_state["matrices"] = generated_matrices
-                st.session_state["selected_doc"] = selected_doc_title
-                st.session_state["card_count"] = card_count_int
-
-            except Exception as e:
-                st.error(f"Something went wrong: {e}")
+        except Exception as e:
+            st.error(f"Something went wrong: {e}")
 
 if "matrices" in st.session_state and st.session_state["matrices"]:
     card_count_int = st.session_state["card_count"]
