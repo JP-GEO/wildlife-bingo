@@ -3,4 +3,5 @@ google-genai
 reportlab
 requests
 pypdf
-tenacity
+beautifulsoup4
+tenacitys
