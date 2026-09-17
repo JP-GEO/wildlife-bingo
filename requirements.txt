@@ -3,6 +3,4 @@ google-genai
 reportlab
 requests
 pypdf
-beautifulsoup4
 tenacity
-youtube-transcript-api
