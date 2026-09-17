@@ -18,7 +18,7 @@ st.set_page_config(page_title="Utah Wildlife Board Bingo", layout="centered")
 
 UTAH_MEETINGS_URL = "https://wildlife.utah.gov/meetings"
 
-# --- CORE HARDCODED TROPES ---
+# --- GUARANTEED HARDCODED CORE TROPES (8 Total) ---
 HARDCODED_CORE_TROPES = [
     "\"Can you hear me now?\"",
     "<b>Interrupted mid-sentence</b>",
@@ -97,14 +97,12 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 st.title("🏔️ Utah Wildlife Board Bingo")
-st.write("Generates instant 5x5 Bingo cards automatically using official meeting agendas from Utah DWR.")
+st.write("Generates instant 5x5 Bingo cards using official meeting agendas from Utah DWR.")
 
-# Secrets Validation
 if "GEMINI_API_KEY" not in st.secrets:
     st.error("Missing Gemini API Key in Streamlit Secrets!")
     st.stop()
 
-# Helper function to extract flexible date/context string
 def extract_flexible_date(text_context):
     pattern = r'(?:\b(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*\s+\d{1,2}(?:\s*[-–&]\s*\d{1,2})?,?\s*(?:\d{4})?)|(?:\d{1,2}[-/\.]\d{1,2}[-/\.]\d{2,4})'
     match = re.search(pattern, text_context, re.IGNORECASE)
@@ -112,7 +110,6 @@ def extract_flexible_date(text_context):
         return match.group(0).strip()
     return None
 
-# 1. SCRAPER FILTERED EXCLUSIVELY TO "AGENDA" DOCUMENTS
 @st.cache_data(ttl=43200)
 def discover_agenda_documents_only():
     headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
@@ -129,11 +126,8 @@ def discover_agenda_documents_only():
                 link_text = a_tag.text.strip()
                 link_text_lower = link_text.lower()
                 
-                # Check 1: Must be a PDF
                 if href_lower.endswith(".pdf"):
                     combined_target = f"{href_lower} {link_text_lower}"
-                    
-                    # Check 2: STRICTLY require "agenda" in title or URL
                     if "agenda" in combined_target:
                         full_url = href if href.startswith("http") else f"https://wildlife.utah.gov{href}"
                         
@@ -179,12 +173,13 @@ def extract_pdf_text_from_bytes(pdf_bytes):
         pdf_file = io.BytesIO(pdf_bytes)
         reader = pypdf.PdfReader(pdf_file)
         extracted_text = ""
-        max_pages = min(len(reader.pages), 6)
+        # Scan up to 10 pages for comprehensive agenda context
+        max_pages = min(len(reader.pages), 10)
         for i in range(max_pages):
             text = reader.pages[i].extract_text()
             if text:
                 extracted_text += text + "\n"
-        return extracted_text[:4000]
+        return extracted_text[:6000]
     except Exception:
         return ""
 
@@ -296,13 +291,13 @@ with c2:
         st.cache_data.clear()
         st.rerun()
 
-# Dropdown filtering strictly to agenda PDFs
 selected_doc_title = st.selectbox("Choose a meeting agenda from Utah DWR:", list(doc_options.keys()))
 selected_pdf_url = doc_options[selected_doc_title]
 
-st.subheader("2. Agenda Download")
+st.subheader("2. Source Document Analysis")
 pdf_bytes = download_pdf_bytes(selected_pdf_url)
 
+document_text = ""
 if pdf_bytes:
     st.download_button(
         label="📥 Download Selected Agenda PDF",
@@ -311,11 +306,14 @@ if pdf_bytes:
         mime="application/pdf"
     )
     document_text = extract_pdf_text_from_bytes(pdf_bytes)
-else:
-    document_text = ""
-    st.info("Could not fetch agenda content.")
 
-# Fallback Upload Option
+# Inspect extracted text snippet to verify AI inputs
+with st.expander("🔍 Inspect Extracted Agenda Text"):
+    if document_text.strip():
+        st.text_area("Parsed Text Preview (First 2000 chars):", document_text[:2000], height=150)
+    else:
+        st.warning("No readable text found in PDF. Try uploading a text-based PDF below.")
+
 with st.expander("➕ Optional: Add Local Agenda PDF"):
     custom_pdf = st.file_uploader("Upload a local PDF file instead", type=["pdf"])
     if custom_pdf:
@@ -327,88 +325,98 @@ with st.expander("➕ Optional: Add Local Agenda PDF"):
 st.subheader("3. Card Quantity")
 num_cards = st.number_input("How many unique Bingo cards do you want to generate?", min_value=1, max_value=20, value=1, step=1)
 
-# Generation Action
 if st.button("🎲 Generate Bingo Cards", type="primary"):
-    with st.spinner("Extracting topics from agenda and generating card(s)..."):
-        try:
-            client = genai.Client(api_key=st.secrets["GEMINI_API_KEY"])
+    if not document_text.strip():
+        st.error("Cannot generate cards: No text could be extracted from the selected agenda document!")
+    else:
+        with st.spinner("Extracting factual topics from agenda and generating card(s)..."):
+            try:
+                client = genai.Client(api_key=st.secrets["GEMINI_API_KEY"])
 
-            prompt = f"""
-            You are generating bingo cards for Utah Wildlife Board and Regional Advisory Council (RAC) meetings.
-            Analyze this text extracted from the selected meeting agenda ({selected_doc_title}):
-            
-            {document_text[:5000]}
-
-            Generate EXACTLY 16 VERY SPECIFIC topics, species names, regulation proposals, or public comment tropes directly mentioned in the text above (max 2-4 words each).
-            
-            CRITICAL FORMATTING RULES:
-            1. If spoken by a commenter, wrap in quotes: "Spoken Phrase"
-            2. If an action or regulation item, wrap in bold: <b>Action or Topic</b>
-            
-            Return ONLY a raw JSON array of 16 strings.
-            """
-
-            response = call_gemini_with_retry(client, prompt)
-            
-            ai_phrases = []
-            if response and hasattr(response, 'text') and response.text:
-                try:
-                    raw_json = response.text.strip().replace("```json", "").replace("```", "")
-                    parsed_list = json.loads(raw_json)
-                    if isinstance(parsed_list, list):
-                        ai_phrases = [str(x) for x in parsed_list if isinstance(x, str)]
-                except Exception:
-                    ai_phrases = []
-
-            ai_phrases = list(ai_phrases)
-
-            if len(ai_phrases) < 16:
-                utah_specific_topics = [
-                    "<b>CWD management debate</b>", "<b>Big game permit quota</b>", 
-                    "<b>Water rights discussion</b>", "<b>RAC committee vote</b>", 
-                    "<b>Cougar hunting limits</b>", "<b>Shed hunting season rule</b>",
-                    "<b>Trail camera ban</b>", "<b>Conservation officer report</b>"
-                ]
-                for topic in utah_specific_topics:
-                    if topic not in ai_phrases:
-                        ai_phrases.append(topic)
-                    if len(ai_phrases) >= 16:
-                        break
-
-            count_ai = int(len(ai_phrases))
-            if count_ai < 16:
-                needed = 16 - count_ai
-                ai_phrases.extend(FALLBACK_AI_TROPES[:needed])
-
-            all_phrases_pool = list(HARDCODED_CORE_TROPES) + list(ai_phrases[:16])
-
-            generated_matrices = []
-            card_count_int = int(num_cards)
-            for i in range(card_count_int):
-                current_pool = list(all_phrases_pool)
-                random.shuffle(current_pool)
+                # Targeted prompt enforcing strict topic, species, and regulation extraction
+                prompt = f"""
+                You are generating dynamic bingo card phrases for a Utah Wildlife Board / Regional Advisory Council (RAC) meeting.
                 
-                matrix = []
-                idx = 0
-                for r in range(5):
-                    row = []
-                    for c in range(5):
-                        if r == 2 and c == 2:
-                            row.append("FREE SPACE")
-                        else:
-                            row.append(current_pool[idx])
-                            idx += 1
-                    matrix.append(row)
-                generated_matrices.append(matrix)
+                Read this extracted meeting agenda carefully:
+                ----------------------------------------
+                {document_text[:5000]}
+                ----------------------------------------
 
-            st.session_state["matrices"] = generated_matrices
-            st.session_state["selected_doc"] = selected_doc_title
-            st.session_state["card_count"] = card_count_int
+                Extract EXACTLY 16 VERY SPECIFIC agenda items, species names, regulation proposals, rule numbers, presenter topics, or regional locations mentioned directly in the document text above.
+                
+                STRICT EXCLUSION RULES:
+                - DO NOT generate generic public comment clichés like "I disagree", "My family hunts here", or "Quick question".
+                - DO NOT generate generic meeting tropes. Focus 100% on the specific topics listed in this document (e.g., "Elk permit quotas", "CWD management plan", "R657 rule amendment", "Northern RAC recommendations", "Waterfowl bag limits").
 
-        except Exception as e:
-            st.error(f"Something went wrong: {e}")
+                FORMATTING REQUIREMENTS:
+                - Every phrase MUST be 2 to 4 words max.
+                - Wrap every extracted topic in HTML bold tags: <b>Topic Name</b>
+                
+                Return ONLY a raw JSON array of 16 strings.
+                Example format: ["<b>Elk permit quotas</b>", "<b>CWD rule change</b>", "<b>Northern RAC vote</b>", "<b>Cougar permit limits</b>"]
+                """
 
-# Render Saved Preview & PDF Output
+                response = call_gemini_with_retry(client, prompt)
+                
+                ai_phrases = []
+                if response and hasattr(response, 'text') and response.text:
+                    try:
+                        raw_json = response.text.strip().replace("```json", "").replace("```", "")
+                        parsed_list = json.loads(raw_json)
+                        if isinstance(parsed_list, list):
+                            ai_phrases = [str(x) for x in parsed_list if isinstance(x, str)]
+                    except Exception:
+                        ai_phrases = []
+
+                ai_phrases = list(ai_phrases)
+
+                # Supplement with Utah-specific topics if agenda is brief
+                if len(ai_phrases) < 16:
+                    utah_specific_topics = [
+                        "<b>CWD management debate</b>", "<b>Big game permit quota</b>", 
+                        "<b>Water rights discussion</b>", "<b>RAC committee vote</b>", 
+                        "<b>Cougar hunting limits</b>", "<b>Shed hunting season rule</b>",
+                        "<b>Trail camera ban</b>", "<b>Conservation officer report</b>"
+                    ]
+                    for topic in utah_specific_topics:
+                        if topic not in ai_phrases:
+                            ai_phrases.append(topic)
+                        if len(ai_phrases) >= 16:
+                            break
+
+                count_ai = int(len(ai_phrases))
+                if count_ai < 16:
+                    needed = 16 - count_ai
+                    ai_phrases.extend(FALLBACK_AI_TROPES[:needed])
+
+                all_phrases_pool = list(HARDCODED_CORE_TROPES) + list(ai_phrases[:16])
+
+                generated_matrices = []
+                card_count_int = int(num_cards)
+                for i in range(card_count_int):
+                    current_pool = list(all_phrases_pool)
+                    random.shuffle(current_pool)
+                    
+                    matrix = []
+                    idx = 0
+                    for r in range(5):
+                        row = []
+                        for c in range(5):
+                            if r == 2 and c == 2:
+                                row.append("FREE SPACE")
+                            else:
+                                row.append(current_pool[idx])
+                                idx += 1
+                        matrix.append(row)
+                    generated_matrices.append(matrix)
+
+                st.session_state["matrices"] = generated_matrices
+                st.session_state["selected_doc"] = selected_doc_title
+                st.session_state["card_count"] = card_count_int
+
+            except Exception as e:
+                st.error(f"Something went wrong: {e}")
+
 if "matrices" in st.session_state and st.session_state["matrices"]:
     card_count_int = st.session_state["card_count"]
     generated_matrices = st.session_state["matrices"]
