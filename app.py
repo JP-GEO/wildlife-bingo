@@ -6,6 +6,7 @@ import re
 import requests
 import pypdf
 from bs4 import BeautifulSoup
+from youtube_transcript_api import YouTubeTranscriptApi
 from google import genai
 from reportlab.lib.pagesizes import letter
 from reportlab.platypus import SimpleDocTemplate, Table, TableStyle, Paragraph, Spacer, PageBreak
@@ -18,7 +19,7 @@ st.set_page_config(page_title="Utah Wildlife Board Bingo", layout="centered")
 
 UTAH_MEETINGS_URL = "https://wildlife.utah.gov/meetings"
 
-# --- CORE PUBLIC BOARD TROPES (Guaranteed across cards, but positioned randomly) ---
+# --- CORE PUBLIC BOARD TROPES (Guaranteed across cards, positioned randomly) ---
 CORE_BOARD_TROPES = [
     "\"Can you hear me now?\"",
     "<b>Interrupted mid-sentence</b>",
@@ -78,24 +79,62 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 st.title("🏔️ Utah Wildlife Board Bingo")
-st.write("Generates balanced, unique 5x5 Bingo cards from official Utah DWR meeting documents.")
+st.write("Generates balanced, unique 5x5 Bingo cards using PDFs, web text, and YouTube video transcripts from Utah DWR.")
 
 if "GEMINI_API_KEY" not in st.secrets:
     st.error("Missing Gemini API Key in Streamlit Secrets!")
     st.stop()
 
+# Helper function to extract dates from text or URLs
 def extract_date_from_string(text):
     date_match = re.search(r'(?:\b(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*\s+\d{1,2}(?:st|nd|rd|th)?,?\s+\d{4})|(?:\d{4}[-_\.]\d{2}[-_\.]\d{2})|(?:\d{1,2}[-_\.]\d{1,2}[-_\.]\d{2,4})', text, re.IGNORECASE)
     return date_match.group(0) if date_match else "Upcoming / General Meetings"
 
+# Helper function to extract YouTube video transcripts
+def get_youtube_transcript(yt_url):
+    try:
+        yt_id = None
+        if "v=" in yt_url:
+            yt_id = yt_url.split("v=")[1].split("&")[0]
+        elif "youtu.be/" in yt_url:
+            yt_id = yt_url.split("youtu.be/")[1].split("?")[0]
+            
+        if yt_id:
+            transcript_list = YouTubeTranscriptApi.get_transcript(yt_id)
+            raw_lines = [item['text'] for item in transcript_list[:150]] # First ~5 minutes
+            return " ".join(raw_lines)
+    except Exception:
+        pass
+    return ""
+
+# 1. SCRAPER FOR PDFs, HTML TEXT, AND YOUTUBE TRANSCRIPTS
 @st.cache_data(ttl=43200)
 def discover_utah_docs_by_date():
     headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
     grouped_dates = {}
+    
     try:
         response = requests.get(UTAH_MEETINGS_URL, headers=headers, timeout=10)
         if response.status_code == 200:
             soup = BeautifulSoup(response.content, "html.parser")
+            
+            # Scrape HTML page text & table contents
+            page_text = ""
+            for element in soup.find_all(['h1', 'h2', 'h3', 'p', 'li', 'td']):
+                txt = element.text.strip()
+                if len(txt) > 5:
+                    page_text += txt + "\n"
+
+            # Check for YouTube links
+            yt_transcript = ""
+            for a_tag in soup.find_all("a", href=True):
+                href = a_tag["href"]
+                if "youtube.com" in href or "youtu.be" in href:
+                    yt_transcript = get_youtube_transcript(href)
+                    if yt_transcript:
+                        break
+
+            # Find PDF documents
             for a_tag in soup.find_all("a", href=True):
                 href = a_tag["href"].lower()
                 text = a_tag.text.strip()
@@ -116,8 +155,13 @@ def discover_utah_docs_by_date():
                         detected_date = extract_date_from_string(f"{text} {parent_text} {href}")
                         
                         if detected_date not in grouped_dates:
-                            grouped_dates[detected_date] = {}
-                        grouped_dates[detected_date][doc_type] = full_url
+                            grouped_dates[detected_date] = {
+                                "files": {},
+                                "html_context": page_text[:2000],
+                                "yt_transcript": yt_transcript[:2000]
+                            }
+                        grouped_dates[detected_date]["files"][doc_type] = full_url
+
     except Exception:
         pass
         
@@ -143,7 +187,7 @@ def extract_pdf_text_from_bytes(pdf_bytes):
             text = reader.pages[i].extract_text()
             if text:
                 extracted_text += text + "\n"
-        return extracted_text[:6000]
+        return extracted_text[:4000]
     except Exception:
         return ""
 
@@ -248,7 +292,8 @@ grouped_docs = discover_utah_docs_by_date()
 
 st.subheader("1. Select Meeting Date")
 selected_date = st.selectbox("Choose meeting date:", list(grouped_docs.keys())) if grouped_docs else "Upcoming Meetings"
-available_files = grouped_docs.get(selected_date, {})
+date_data = grouped_docs.get(selected_date, {"files": {}, "html_context": "", "yt_transcript": ""})
+available_files = date_data.get("files", {})
 
 st.subheader("2. Source Documents for Selected Date")
 cols = st.columns(3)
@@ -267,9 +312,15 @@ for idx, doc_type in enumerate(["Agenda", "Packet", "Feedback"]):
                 )
                 text_content = extract_pdf_text_from_bytes(file_bytes)
                 if text_content:
-                    file_texts.append(f"--- {doc_type.upper()} CONTENT ---\n" + text_content)
+                    file_texts.append(f"--- {doc_type.upper()} PDF CONTENT ---\n" + text_content)
         else:
             st.info(f"No {doc_type} PDF")
+
+# Add HTML page text and YouTube transcripts to context
+if date_data.get("html_context"):
+    file_texts.append("--- WEBSITE PAGE CONTENT ---\n" + date_data["html_context"])
+if date_data.get("yt_transcript"):
+    file_texts.append("--- YOUTUBE MEETING TRANSCRIPT ---\n" + date_data["yt_transcript"])
 
 combined_date_text = "\n\n".join(file_texts)
 
@@ -283,9 +334,9 @@ if st.button("🎲 Generate Unique Bingo Cards", type="primary"):
 
             prompt = f"""
             You are generating a large pool of phrases for Utah Wildlife Board meeting bingo cards.
-            Analyze these official meeting documents for {selected_date}:
+            Analyze all text extracted from PDFs, the web page, and video transcripts for {selected_date}:
             
-            {combined_date_text[:5000]}
+            {combined_date_text[:6000]}
 
             Generate EXACTLY 40 SHORT, DISTINCT, EASY-TO-TRIGGER phrases (2-5 words max) specific to topics, species, regulations, regions, or public comments found in this text.
 
@@ -309,9 +360,7 @@ if st.button("🎲 Generate Unique Bingo Cards", type="primary"):
                 except Exception:
                     pass
 
-            # Ensure the pool is large enough for true combination sampling
             if len(ai_pool) < 25:
-                st.warning("Agenda text was brief; adding general wildlife topics to expand card variety.")
                 extra_pool = [
                     "<b>CWD management plan</b>", "<b>Big game permit quotas</b>", "<b>Water rights discussion</b>",
                     "<b>Regional Advisory Council vote</b>", "<b>Public comment timer beep</b>", "<b>Cougar hunting limits</b>",
@@ -321,22 +370,17 @@ if st.button("🎲 Generate Unique Bingo Cards", type="primary"):
                 ]
                 ai_pool.extend(extra_pool)
 
-            # Deduplicate while preserving order
             unique_ai_pool = list(dict.fromkeys(ai_pool))
 
-            # Build cards using random.sample for combination diversity
             generated_matrices = []
             card_count = int(num_cards)
 
             for _ in range(card_count):
-                # Sample 16 unique items from the AI topic pool
                 needed_ai = min(16, len(unique_ai_pool))
                 ai_sample = random.sample(unique_ai_pool, needed_ai)
                 
-                # Combine with core tropes and shuffle positions
                 card_phrases = list(CORE_BOARD_TROPES[:8]) + ai_sample
                 
-                # Top off to 24 if pool was small
                 if len(card_phrases) < 24:
                     fill_items = [p for p in unique_ai_pool if p not in card_phrases]
                     card_phrases.extend(fill_items[:(24 - len(card_phrases))])
