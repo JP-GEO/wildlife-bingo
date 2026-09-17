@@ -104,19 +104,20 @@ if "GEMINI_API_KEY" not in st.secrets:
     st.error("Missing Gemini API Key in Streamlit Secrets!")
     st.stop()
 
-# Helper function to extract or clean date titles
-def extract_date_title(text, parent_text):
-    date_match = re.search(r'(?:\b(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*\s+\d{1,2}(?:st|nd|rd|th)?,?\s+\d{4})|(?:\d{4}[-_\.]\d{2}[-_\.]\d{2})|(?:\d{1,2}[-_\.]\d{1,2}[-_\.]\d{2,4})', f"{text} {parent_text}", re.IGNORECASE)
+# Extract strict meeting dates from text or parent containers
+def extract_meeting_date(text):
+    # Regex to catch dates like "Jan 15, 2026", "September 8", "09/15/2026"
+    date_match = re.search(
+        r'(?:\b(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*\s+\d{1,2}(?:st|nd|rd|th)?,?\s*(?:\d{4})?)|'
+        r'(?:\d{1,2}[-/\.]\d{1,2}[-/\.]\d{2,4})', 
+        text, 
+        re.IGNORECASE
+    )
     if date_match:
-        return date_match.group(0)
-    
-    # Clean fallback title from parent text
-    clean_parent = re.sub(r'\s+', ' ', parent_text).strip()
-    if len(clean_parent) > 5 and len(clean_parent) < 60:
-        return clean_parent
-    return "Upcoming / General Meetings"
+        return date_match.group(0).strip()
+    return None
 
-# 1. DATE-STRICT SCRAPER
+# 1. DATE-FIRST SCRAPER
 @st.cache_data(ttl=43200)
 def discover_utah_docs_by_date():
     headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
@@ -127,28 +128,44 @@ def discover_utah_docs_by_date():
         if response.status_code == 200:
             soup = BeautifulSoup(response.content, "html.parser")
             
-            for a_tag in soup.find_all("a", href=True):
-                href = a_tag["href"]
-                href_lower = href.lower()
-                text = a_tag.text.strip()
+            # Scan table rows, list items, and paragraph sections
+            containers = soup.find_all(["tr", "li", "p", "div"])
+            
+            for container in containers:
+                container_text = container.text.strip()
+                detected_date = extract_meeting_date(container_text)
                 
-                if href_lower.endswith(".pdf"):
-                    full_url = href if href.startswith("http") else f"https://wildlife.utah.gov{href}"
+                # Search for PDF links inside containers that have a date
+                pdf_links = container.find_all("a", href=True)
+                for a_tag in pdf_links:
+                    href = a_tag["href"]
+                    href_lower = href.lower()
+                    link_text = a_tag.text.strip().lower()
                     
-                    doc_type = "Agenda"
-                    if "packet" in href_lower or "packet" in text.lower():
-                        doc_type = "Packet"
-                    elif "feedback" in href_lower or "feedback" in text.lower():
-                        doc_type = "Feedback"
-                    
-                    parent_element = a_tag.find_parent(["tr", "li", "p", "div"])
-                    parent_text = parent_element.text.strip() if parent_element else ""
-                    
-                    date_key = extract_date_title(text, parent_text)
-                    
-                    if date_key not in grouped_dates:
-                        grouped_dates[date_key] = {}
-                    grouped_dates[date_key][doc_type] = full_url
+                    if href_lower.endswith(".pdf"):
+                        full_url = href if href.startswith("http") else f"https://wildlife.utah.gov{href}"
+                        
+                        # Determine document type
+                        doc_type = "Agenda"
+                        if "packet" in href_lower or "packet" in link_text:
+                            doc_type = "Packet"
+                        elif "feedback" in href_lower or "feedback" in link_text:
+                            doc_type = "Feedback"
+                        
+                        # Determine date grouping key
+                        date_key = detected_date if detected_date else extract_meeting_date(href)
+                        if not date_key:
+                            # Fallback to header text if no inline date was matched
+                            prev_header = container.find_previous(["h2", "h3", "h4"])
+                            if prev_header:
+                                date_key = extract_meeting_date(prev_header.text) or prev_header.text.strip()[:40]
+                            else:
+                                date_key = "Upcoming Board Meetings"
+
+                        if date_key not in grouped_dates:
+                            grouped_dates[date_key] = {}
+                        
+                        grouped_dates[date_key][doc_type] = full_url
 
     except Exception:
         pass
@@ -268,7 +285,7 @@ def create_multi_card_pdf(matrices_list, doc_title):
 
         story.append(Paragraph("<b>UTAH WILDLIFE BOARD BINGO</b>", title_style))
         story.append(Spacer(1, 4))
-        story.append(Paragraph(f"Mark each square live during the meeting. • Date: {doc_title[:45]} • Card #{card_idx + 1} of {total_cards}", subtitle_style))
+        story.append(Paragraph(f"Mark each square live during the meeting. • Meeting Date: {doc_title} • Card #{card_idx + 1} of {total_cards}", subtitle_style))
         story.append(Spacer(1, 10))
         story.append(table)
         story.append(Spacer(1, 8))
@@ -286,23 +303,22 @@ grouped_docs = discover_utah_docs_by_date()
 
 c1, c2 = st.columns([4, 1])
 with c1:
-    st.subheader("1. Explore Documents by Meeting Date")
+    st.subheader("1. Select Meeting Date")
 with c2:
     if st.button("🔄 Refresh"):
         st.cache_data.clear()
         st.rerun()
 
-# Date Selection Dropdown
-selected_date = st.selectbox("Select a meeting date:", list(grouped_docs.keys()))
+# Clean Date Selection Dropdown
+selected_date = st.selectbox("Choose a meeting date from Utah DWR:", list(grouped_docs.keys()))
 
-# Filter available files ONLY for the selected date
+# Filter available source files ONLY for the selected date
 available_files = grouped_docs[selected_date]
 
-st.subheader(f"2. Source Documents for {selected_date}")
+st.subheader(f"2. Available Source Documents for {selected_date}")
 cols = st.columns(3)
 
 file_texts = []
-# Display download buttons strictly belonging to the selected date
 for idx, doc_type in enumerate(["Agenda", "Packet", "Feedback"]):
     with cols[idx]:
         if doc_type in available_files:
@@ -336,7 +352,7 @@ num_cards = st.number_input("How many unique Bingo cards do you want to generate
 
 # Generation Action
 if st.button("🎲 Generate Bingo Cards", type="primary"):
-    with st.spinner(f"Extracting topics for {selected_date} and generating {num_cards} card(s)..."):
+    with st.spinner(f"Extracting topics for meeting on {selected_date} and generating {num_cards} card(s)..."):
         try:
             client = genai.Client(api_key=st.secrets["GEMINI_API_KEY"])
 
