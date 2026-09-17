@@ -9,6 +9,7 @@ from reportlab.lib.pagesizes import letter
 from reportlab.platypus import SimpleDocTemplate, Table, TableStyle, Paragraph, Spacer
 from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
 from reportlab.lib import colors
+from tenacity import retry, stop_after_attempt, wait_random_exponential
 
 # Page Setup
 st.set_page_config(page_title="Wildlife Board Bingo", layout="centered")
@@ -72,6 +73,18 @@ def extract_text_from_pdf_bytes(pdf_bytes):
         if text:
             extracted_text += text + "\n"
     return extracted_text
+
+# Retry function to handle 503 high-demand errors gracefully
+@retry(
+    wait=wait_random_exponential(min=1, max=10),
+    stop=stop_after_attempt(3),
+    retry_error_callback=lambda retry_state: None
+)
+def call_gemini_with_retry(client, prompt):
+    return client.models.generate_content(
+        model='gemini-3.6-flash',
+        contents=prompt,
+    )
 
 # Input Options Tab Bar
 tab1, tab2, tab3 = st.tabs(["🌐 PDF Web Link", "📁 Upload PDF", "✍️ Paste Text"])
@@ -236,7 +249,7 @@ def create_bw_square_pdf(bingo_matrix):
     return buffer
 
 
-# Generate Action
+# --- GENERATION BLOCK ---
 if st.button("Generate Bingo Card", type="primary"):
     if not agenda_text.strip():
         st.warning("Please provide an agenda first (paste URL, upload PDF, or paste text)!")
@@ -261,10 +274,8 @@ if st.button("Generate Bingo Card", type="primary"):
                 Example format: ["\"Can you hear me?\"", "<b>Audio cuts out</b>", "\"I have a question\"", "<b>Public comment beep</b>"]
                 """
 
-                response = client.models.generate_content(
-                    model='gemini-3.6-flash',
-                    contents=prompt,
-                )
+                # Executing Gemini call with retry protection
+                response = call_gemini_with_retry(client, prompt)
 
                 raw_json = response.text.strip().replace("```json", "").replace("```", "")
                 phrases = json.loads(raw_json)

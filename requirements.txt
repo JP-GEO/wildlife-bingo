@@ -1,3 +1,4 @@
+tenacity
 streamlit
 google-genai
 reportlab
