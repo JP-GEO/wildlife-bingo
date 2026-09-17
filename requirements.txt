@@ -4,4 +4,4 @@ reportlab
 requests
 pypdf
 beautifulsoup4
-tenacitys
+tenacity

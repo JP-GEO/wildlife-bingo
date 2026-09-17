@@ -17,7 +17,7 @@ st.set_page_config(page_title="Utah Wildlife Board Bingo", layout="centered")
 
 UTAH_MEETINGS_URL = "https://wildlife.utah.gov/meetings"
 
-# --- CORE PUBLIC BOARD TROPES ---
+# --- HARDCODED TROPES ---
 HARDCODED_CORE_TROPES = [
     "\"Can you hear me now?\"",
     "<b>Interrupted mid-sentence</b>",
@@ -98,12 +98,12 @@ st.markdown("""
 st.title("🏔️ Utah Wildlife Board Bingo")
 st.write("Generates instant 5x5 Bingo cards automatically using official meeting documents from Utah DWR.")
 
-# API Key Check
+# Secrets Validation
 if "GEMINI_API_KEY" not in st.secrets:
     st.error("Missing Gemini API Key in Streamlit Secrets!")
     st.stop()
 
-# Robust Scraper that extracts meeting sections and date titles
+# 1. SCRAPER WITH CACHING & CLEAR BUTTON
 @st.cache_data(ttl=43200)
 def discover_utah_docs_by_date():
     headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
@@ -210,12 +210,12 @@ def create_multi_card_pdf(matrices_list, doc_title):
     )
     cell_style = ParagraphStyle(
         'SquareCellText', parent=styles['Normal'],
-        fontName='Helvetica', fontSize=8.5, leading=11,
+        fontName='Helvetica', fontSize=8, leading=10,
         textColor=colors.black, alignment=1
     )
     free_space_style = ParagraphStyle(
         'FreeSpaceText', parent=cell_style,
-        fontName='Helvetica-Bold', fontSize=9.5, leading=12,
+        fontName='Helvetica-Bold', fontSize=9, leading=11,
         textColor=colors.black
     )
     footer_style = ParagraphStyle(
@@ -241,16 +241,16 @@ def create_multi_card_pdf(matrices_list, doc_title):
                     formatted_row.append(Paragraph(cell, cell_style))
             formatted_data.append(formatted_row)
 
-        table = Table(formatted_data, colWidths=[102]*5, rowHeights=[34] + [100]*5)
+        table = Table(formatted_data, colWidths=[100]*5, rowHeights=[30] + [95]*5)
         table.setStyle(TableStyle([
             ('BACKGROUND', (0, 0), (-1, 0), colors.black),
             ('ALIGN', (0, 0), (-1, -1), 'CENTER'),
             ('VALIGN', (0, 0), (-1, -1), 'MIDDLE'),
             ('BACKGROUND', (0, 1), (-1, -1), colors.white),
-            ('TOPPADDING', (0, 0), (-1, -1), 6),
-            ('BOTTOMPADDING', (0, 0), (-1, -1), 6),
-            ('LEFTPADDING', (0, 0), (-1, -1), 6),
-            ('RIGHTPADDING', (0, 0), (-1, -1), 6),
+            ('TOPPADDING', (0, 0), (-1, -1), 4),
+            ('BOTTOMPADDING', (0, 0), (-1, -1), 4),
+            ('LEFTPADDING', (0, 0), (-1, -1), 4),
+            ('RIGHTPADDING', (0, 0), (-1, -1), 4),
             ('INNERGRID', (0, 0), (-1, -1), 1, colors.black),
             ('BOX', (0, 0), (-1, -1), 2, colors.black),
             ('BACKGROUND', (2, 3), (2, 3), colors.HexColor('#E5E5E5')),
@@ -259,12 +259,11 @@ def create_multi_card_pdf(matrices_list, doc_title):
         story.append(Paragraph("<b>UTAH WILDLIFE BOARD BINGO</b>", title_style))
         story.append(Spacer(1, 4))
         story.append(Paragraph(f"Mark each square live during the meeting. • Meeting: {doc_title[:45]} • Card #{card_idx + 1} of {total_cards}", subtitle_style))
-        story.append(Spacer(1, 12))
-        story.append(table)
         story.append(Spacer(1, 10))
+        story.append(table)
+        story.append(Spacer(1, 8))
         story.append(Paragraph("Official Meeting Bingo Card • 5 in a row horizontally, vertically, or diagonally wins", footer_style))
 
-        # Add PageBreak between every card EXCEPT the last one
         if card_idx < total_cards - 1:
             story.append(PageBreak())
 
@@ -272,16 +271,21 @@ def create_multi_card_pdf(matrices_list, doc_title):
     buffer.seek(0)
     return buffer
 
-# Discover grouped documents
+# UI Setup
 grouped_docs = discover_utah_docs_by_date()
 
-# UI Layout
-st.subheader("1. Select Meeting / Document Date")
+c1, c2 = st.columns([4, 1])
+with c1:
+    st.subheader("1. Select Meeting / Document Date")
+with c2:
+    if st.button("🔄 Refresh"):
+        st.cache_data.clear()
+        st.rerun()
+
 selected_date = st.selectbox("Choose meeting document:", list(grouped_docs.keys()))
 available_files = grouped_docs[selected_date]
 
-# File Download Options
-st.subheader("2. Available Source Documents")
+st.subheader("2. Source Documents")
 cols = st.columns(3)
 
 file_texts = []
@@ -302,14 +306,23 @@ for idx, doc_type in enumerate(["Agenda", "Packet", "Feedback"]):
         else:
             st.info(f"No {doc_type} PDF")
 
+# Fallback Manual Upload
+with st.expander("➕ Optional: Upload Custom Agenda PDF"):
+    custom_pdf = st.file_uploader("Upload a local PDF file", type=["pdf"])
+    if custom_pdf:
+        custom_text = extract_pdf_text_from_bytes(custom_pdf.read())
+        if custom_text:
+            file_texts.append("--- CUSTOM PDF CONTENT ---\n" + custom_text)
+            st.success("Custom PDF added to analysis!")
+
 combined_date_text = "\n\n".join(file_texts)
 
 st.subheader("3. Card Quantity")
 num_cards = st.number_input("How many unique Bingo cards do you want to generate?", min_value=1, max_value=20, value=1, step=1)
 
-# Generation Action
+# Generation Logic with Session State
 if st.button("🎲 Generate Bingo Cards", type="primary"):
-    with st.spinner(f"Extracting meeting topics for '{selected_date[:30]}' and generating {num_cards} card(s)..."):
+    with st.spinner(f"Extracting meeting topics and generating {num_cards} card(s)..."):
         try:
             client = genai.Client(api_key=st.secrets["GEMINI_API_KEY"])
 
@@ -320,7 +333,6 @@ if st.button("🎲 Generate Bingo Cards", type="primary"):
             {combined_date_text[:5000]}
 
             Generate EXACTLY 16 VERY SPECIFIC topics, species names, regulation proposals, or public comment tropes directly mentioned in the text above (max 2-4 words each).
-            Examples of good outputs: "Elk permit quotas", "CWD testing rule", "Northeastern RAC vote", "Cougar hunting debate".
             
             CRITICAL FORMATTING RULES:
             1. If spoken by a commenter, wrap in quotes: "Spoken Phrase"
@@ -341,10 +353,8 @@ if st.button("🎲 Generate Bingo Cards", type="primary"):
                 except Exception:
                     ai_phrases = []
 
-            # Explicit type casting to ensure it stays a list
             ai_phrases = list(ai_phrases)
 
-            # If document text was short, supplement with Utah-specific topics
             if len(ai_phrases) < 16:
                 utah_specific_topics = [
                     "<b>CWD management debate</b>", "<b>Big game permit quota</b>", 
@@ -358,16 +368,13 @@ if st.button("🎲 Generate Bingo Cards", type="primary"):
                     if len(ai_phrases) >= 16:
                         break
 
-            # Fill remaining slots with general fallbacks if still short
             count_ai = int(len(ai_phrases))
             if count_ai < 16:
                 needed = 16 - count_ai
                 ai_phrases.extend(FALLBACK_AI_TROPES[:needed])
 
-            # Build full pool of 24 phrases (8 Core + 16 AI Agenda items)
             all_phrases_pool = list(HARDCODED_CORE_TROPES) + list(ai_phrases[:16])
 
-            # Generate N unique card matrices with unique shuffles
             generated_matrices = []
             card_count_int = int(num_cards)
             for i in range(card_count_int):
@@ -387,31 +394,40 @@ if st.button("🎲 Generate Bingo Cards", type="primary"):
                     matrix.append(row)
                 generated_matrices.append(matrix)
 
-            st.success(f"{card_count_int} Bingo Card(s) Generated!")
-
-            # Preview Card #1
-            st.subheader("Card #1 Preview")
-            html_grid = ['<div class="bingo-grid">']
-            for letter in ["B", "I", "N", "G", "O"]:
-                html_grid.append(f'<div class="bingo-header">{letter}</div>')
-            for r_i, row in enumerate(generated_matrices[0]):
-                for c_i, cell in enumerate(row):
-                    if r_i == 2 and c_i == 2:
-                        html_grid.append('<div class="bingo-cell bingo-free">FREE SPACE<br/><small>Timer Beep</small></div>')
-                    else:
-                        html_grid.append(f'<div class="bingo-cell">{cell}</div>')
-            html_grid.append('</div>')
-
-            st.markdown("".join(html_grid), unsafe_allow_html=True)
-
-            # Download Multipage PDF containing ALL generated cards
-            pdf_data = create_multi_card_pdf(generated_matrices, selected_date)
-            st.download_button(
-                label=f"📄 Download Printable PDF ({card_count_int} Card{'s' if card_count_int > 1 else ''})",
-                data=pdf_data,
-                file_name="utah_wildlife_bingo.pdf",
-                mime="application/pdf"
-            )
+            # Store in session state
+            st.session_state["matrices"] = generated_matrices
+            st.session_state["selected_date"] = selected_date
+            st.session_state["card_count"] = card_count_int
 
         except Exception as e:
             st.error(f"Something went wrong: {e}")
+
+# Render Results if Session State Exists
+if "matrices" in st.session_state and st.session_state["matrices"]:
+    card_count_int = st.session_state["card_count"]
+    generated_matrices = st.session_state["matrices"]
+    doc_date = st.session_state["selected_date"]
+
+    st.success(f"{card_count_int} Bingo Card(s) Ready!")
+
+    st.subheader("Card #1 Preview")
+    html_grid = ['<div class="bingo-grid">']
+    for letter in ["B", "I", "N", "G", "O"]:
+        html_grid.append(f'<div class="bingo-header">{letter}</div>')
+    for r_i, row in enumerate(generated_matrices[0]):
+        for c_i, cell in enumerate(row):
+            if r_i == 2 and c_i == 2:
+                html_grid.append('<div class="bingo-cell bingo-free">FREE SPACE<br/><small>Timer Beep</small></div>')
+            else:
+                html_grid.append(f'<div class="bingo-cell">{cell}</div>')
+    html_grid.append('</div>')
+
+    st.markdown("".join(html_grid), unsafe_allow_html=True)
+
+    pdf_data = create_multi_card_pdf(generated_matrices, doc_date)
+    st.download_button(
+        label=f"📄 Download Printable PDF ({card_count_int} Card{'s' if card_count_int > 1 else ''})",
+        data=pdf_data,
+        file_name="utah_wildlife_bingo.pdf",
+        mime="application/pdf"
+    )
