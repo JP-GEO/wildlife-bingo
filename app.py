@@ -20,10 +20,20 @@ if "GEMINI_API_KEY" not in st.secrets:
     st.error("Missing Gemini API Key in Streamlit Secrets!")
     st.stop()
 
+# Helper function to extract text from raw PDF bytes
+def extract_text_from_pdf_bytes(pdf_bytes):
+    pdf_file = io.BytesIO(pdf_bytes)
+    reader = pypdf.PdfReader(pdf_file)
+    extracted_text = ""
+    for page in reader.pages:
+        text = page.extract_text()
+        if text:
+            extracted_text += text + "\n"
+    return extracted_text
+
 # Input Options Tab Bar
 tab1, tab2, tab3 = st.tabs(["🌐 PDF Web Link", "📁 Upload PDF", "✍️ Paste Text"])
 
-agenda_bytes = None
 agenda_text = ""
 
 with tab1:
@@ -32,8 +42,12 @@ with tab1:
         try:
             res = requests.get(pdf_url, timeout=10)
             if res.status_code == 200:
-                agenda_bytes = res.content
-                st.success("Successfully fetched PDF from URL!")
+                extracted = extract_text_from_pdf_bytes(res.content)
+                if extracted.strip():
+                    agenda_text = extracted
+                    st.success("Successfully fetched and read PDF from URL!")
+                else:
+                    st.error("Fetched PDF appears to be empty or image-only.")
             else:
                 st.error(f"Failed to fetch PDF (HTTP Status {res.status_code}).")
         except Exception as e:
@@ -42,11 +56,20 @@ with tab1:
 with tab2:
     uploaded_file = st.file_uploader("Upload Agenda PDF File", type=["pdf"])
     if uploaded_file:
-        agenda_bytes = uploaded_file.read()
-        st.success("File uploaded successfully!")
+        try:
+            extracted = extract_text_from_pdf_bytes(uploaded_file.read())
+            if extracted.strip():
+                agenda_text = extracted
+                st.success("PDF uploaded and processed successfully!")
+            else:
+                st.error("Uploaded PDF appears to be empty or image-only.")
+        except Exception as e:
+            st.error(f"Error reading uploaded PDF: {e}")
 
 with tab3:
-    agenda_text = st.text_area("Paste Agenda Text:", height=180, placeholder="Paste agenda items here...")
+    pasted_text = st.text_area("Paste Agenda Text:", height=180, placeholder="Paste agenda items here...")
+    if pasted_text.strip():
+        agenda_text = pasted_text
 
 # PDF Card Generation Function
 def create_pdf(bingo_matrix):
@@ -94,34 +117,26 @@ def create_pdf(bingo_matrix):
 
 # Generate Action
 if st.button("Generate Bingo Card", type="primary"):
-    if not agenda_bytes and not agenda_text.strip():
-        st.warning("Please provide a PDF URL, upload a PDF, or paste text first!")
+    if not agenda_text.strip():
+        st.warning("Please provide a valid PDF URL, upload a PDF, or paste text first!")
     else:
         with st.spinner("AI is analyzing the agenda and crafting bingo tropes..."):
             try:
                 client = genai.Client(api_key=st.secrets["GEMINI_API_KEY"])
                 
-                prompt = """
+                prompt = f"""
                 You are generating bingo cards for a state Board of Wildlife Resources meeting.
-                Analyze the provided meeting agenda.
+                Analyze the following meeting agenda:
+                
+                {agenda_text}
 
                 Return EXACTLY 24 short, humorous, realistic phrases (max 6 words each) representing recurring public comment tropes, technical glitches, or specific topics found in this agenda.
                 Return ONLY a raw JSON array of 24 strings. Example: ["Phrase 1", "Phrase 2", ...]
                 """
-                
-                # Construct multimodal payload depending on input type
-                contents = [prompt]
-                if agenda_bytes:
-                    contents.append({
-                        "mime_type": "application/pdf",
-                        "data": agenda_bytes
-                    })
-                else:
-                    contents.append(f"AGENDA TEXT:\n{agenda_text}")
 
                 response = client.models.generate_content(
                     model='gemini-3.6-flash',
-                    contents=contents,
+                    contents=prompt,
                 )
                 
                 # Clean JSON Output
@@ -144,7 +159,7 @@ if st.button("Generate Bingo Card", type="primary"):
                 
                 st.success("Bingo Card Ready!")
                 
-                # Display Interactive Preview Grid
+                # Display Preview Grid
                 st.subheader("Your Generated Card")
                 st.table(matrix)
                 
