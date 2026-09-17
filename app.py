@@ -4,22 +4,20 @@ import random
 import io
 import requests
 import pypdf
-from datetime import datetime
-from dateutil import parser
+from bs4 import BeautifulSoup
 from google import genai
 from reportlab.lib.pagesizes import letter
-from reportlab.platypus import SimpleDocTemplate, Table, TableStyle, Paragraph, Spacer
+from reportlab.platypus import SimpleDocTemplate, Table, TableStyle, Paragraph, Spacer, PageBreak
 from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
 from reportlab.lib import colors
 from tenacity import retry, stop_after_attempt, wait_random_exponential
 
 # Page Setup
-st.set_page_config(page_title="Wildlife Board Bingo", layout="centered")
+st.set_page_config(page_title="Utah Wildlife Board Bingo", layout="centered")
 
-# --- HARDCODED BACKEND CONFIGURATION ---
-DEFAULT_AGENDA_URL = "https://wildlife.utah.gov/pdf/meetings/board/2026-09-17-board-packet.pdf"
+UTAH_MEETINGS_URL = "https://wildlife.utah.gov/meetings"
 
-# 8 Guaranteed Core Tropes
+# --- HARDCODED TROPES ---
 HARDCODED_CORE_TROPES = [
     "\"Can you hear me now?\"",
     "<b>Interrupted mid-sentence</b>",
@@ -31,7 +29,6 @@ HARDCODED_CORE_TROPES = [
     "\"With all due respect...\""
 ]
 
-# 16 Fallback Tropes in case AI response is empty or blocked
 FALLBACK_AI_TROPES = [
     "<b>I dont have those numbers</b>",
     "\"I have a quick question\"",
@@ -51,7 +48,7 @@ FALLBACK_AI_TROPES = [
     "<b>Presenter mixes up their slides</b>"
 ]
 
-# High-contrast Black & White styling
+# High-contrast Black & White Styling
 st.markdown("""
 <style>
     .bingo-grid {
@@ -98,50 +95,56 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
-st.title("Board of Wildlife Resources Bingo")
-st.write("Click the button below to generate a printable 5x5 square Bingo card for today's meeting.")
+st.title("🏔️ Utah Wildlife Board Bingo")
+st.write("Generates instant 5x5 Bingo cards automatically using active meeting documents from Utah DWR.")
 
 # API Key Check
 if "GEMINI_API_KEY" not in st.secrets:
     st.error("Missing Gemini API Key in Streamlit Secrets!")
     st.stop()
 
-# Helper function to extract text and last modified date
-def get_agenda_content_and_date(url):
+# 1. LIGHTWEIGHT SCRAPER WITH CACHING (Runs once every 12 hours)
+@st.cache_data(ttl=43200)
+def fetch_latest_utah_doc():
+    headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
     try:
-        res = requests.get(url, timeout=10)
-        if res.status_code == 200:
-            pdf_file = io.BytesIO(res.content)
-            reader = pypdf.PdfReader(pdf_file)
-            
-            text = ""
-            for page in reader.pages:
-                t = page.extract_text()
-                if t:
-                    text += t + "\n"
-                    
-            doc_date = None
-            if reader.metadata:
-                raw_date = reader.metadata.get('/ModDate') or reader.metadata.get('/CreationDate')
-                if raw_date:
-                    try:
-                        clean_d = raw_date.replace("D:", "")[:8]
-                        doc_date = datetime.strptime(clean_d, "%Y%m%d").strftime("%B %d, %Y")
-                    except Exception:
-                        doc_date = None
-                        
-            if not doc_date and res.headers.get('Last-Modified'):
-                try:
-                    doc_date = parser.parse(res.headers.get('Last-Modified')).strftime("%B %d, %Y")
-                except Exception:
-                    doc_date = None
-                    
-            return text, doc_date or datetime.now().strftime("%B %d, %Y")
-    except Exception:
-        pass
-    return "", datetime.now().strftime("%B %d, %Y")
+        response = requests.get(UTAH_MEETINGS_URL, headers=headers, timeout=10)
+        if response.status_code != 200:
+            return "", "Utah DWR Site Unavailable"
 
-# Retry wrapper for API calls
+        soup = BeautifulSoup(response.content, "html.parser")
+        pdf_url = None
+        doc_title = "Utah DWR Agenda"
+
+        for a_tag in soup.find_all("a", href=True):
+            href = a_tag["href"]
+            text = a_tag.text.lower()
+            if href.endswith(".pdf"):
+                if "agenda" in text or "rac" in text or "packet" in text or "summary" in text:
+                    pdf_url = href if href.startswith("http") else f"https://wildlife.utah.gov{href}"
+                    doc_title = a_tag.text.strip()
+                    break
+
+        if not pdf_url:
+            return "", "No Active PDF Found (Using Fallbacks)"
+
+        pdf_res = requests.get(pdf_url, headers=headers, timeout=10)
+        pdf_file = io.BytesIO(pdf_res.content)
+        reader = pypdf.PdfReader(pdf_file)
+
+        extracted_text = ""
+        max_pages = min(len(reader.pages), 5)
+        for i in range(max_pages):
+            text = reader.pages[i].extract_text()
+            if text:
+                extracted_text += text + "\n"
+
+        return extracted_text[:4000], doc_title
+
+    except Exception as e:
+        return "", f"Scraping Fallback: {e}"
+
+# 2. RETRY WRAPPER FOR GEMINI
 @retry(
     wait=wait_random_exponential(min=1, max=10),
     stop=stop_after_attempt(3),
@@ -153,8 +156,8 @@ def call_gemini_with_retry(client, prompt):
         contents=prompt,
     )
 
-# PDF Creator
-def create_bw_square_pdf(bingo_matrix, last_updated_str):
+# 3. MULTI-PAGE PRINTABLE PDF CREATOR
+def create_multi_card_pdf(matrices_list, doc_title):
     buffer = io.BytesIO()
     doc = SimpleDocTemplate(
         buffer, pagesize=letter,
@@ -187,121 +190,137 @@ def create_bw_square_pdf(bingo_matrix, last_updated_str):
         fontName='Helvetica-Bold', fontSize=9.5, leading=12,
         textColor=colors.black
     )
-
-    formatted_data = []
-    headers = [Paragraph(f"<b>{letter}</b>", header_letter_style) for letter in ["B", "I", "N", "G", "O"]]
-    formatted_data.append(headers)
-
-    for row_idx, row in enumerate(bingo_matrix):
-        formatted_row = []
-        for col_idx, cell in enumerate(row):
-            if row_idx == 2 and col_idx == 2:
-                formatted_row.append(Paragraph("<b>FREE SPACE<br/><font size=6.5>PUBLIC COMMENT BEEP</font></b>", free_space_style))
-            else:
-                formatted_row.append(Paragraph(cell, cell_style))
-        formatted_data.append(formatted_row)
-
-    table = Table(formatted_data, colWidths=[102]*5, rowHeights=[34] + [100]*5)
-    table.setStyle(TableStyle([
-        ('BACKGROUND', (0, 0), (-1, 0), colors.black),
-        ('ALIGN', (0, 0), (-1, -1), 'CENTER'),
-        ('VALIGN', (0, 0), (-1, -1), 'MIDDLE'),
-        ('BACKGROUND', (0, 1), (-1, -1), colors.white),
-        ('TOPPADDING', (0, 0), (-1, -1), 6),
-        ('BOTTOMPADDING', (0, 0), (-1, -1), 6),
-        ('LEFTPADDING', (0, 0), (-1, -1), 6),
-        ('RIGHTPADDING', (0, 0), (-1, -1), 6),
-        ('INNERGRID', (0, 0), (-1, -1), 1, colors.black),
-        ('BOX', (0, 0), (-1, -1), 2, colors.black),
-        ('BACKGROUND', (2, 3), (2, 3), colors.HexColor('#E5E5E5')),
-    ]))
-
     footer_style = ParagraphStyle(
         'BWFooter', parent=styles['Normal'],
         fontName='Helvetica', fontSize=8, leading=10,
         textColor=colors.black, alignment=1
     )
 
-    story = [
-        Paragraph("<b>BOARD OF WILDLIFE RESOURCES BINGO</b>", title_style),
-        Spacer(1, 4),
-        Paragraph(f"Mark each square live during the meeting. • Agenda Last Updated: {last_updated_str}", subtitle_style),
-        Spacer(1, 12),
-        table,
-        Spacer(1, 10),
-        Paragraph("Official Meeting Bingo Card • 5 in a row horizontally, vertically, or diagonally wins", footer_style)
-    ]
+    story = []
+    total_cards = len(matrices_list)
+
+    for card_idx, matrix in enumerate(matrices_list):
+        formatted_data = []
+        headers = [Paragraph(f"<b>{letter}</b>", header_letter_style) for letter in ["B", "I", "N", "G", "O"]]
+        formatted_data.append(headers)
+
+        for row_idx, row in enumerate(matrix):
+            formatted_row = []
+            for col_idx, cell in enumerate(row):
+                if row_idx == 2 and col_idx == 2:
+                    formatted_row.append(Paragraph("<b>FREE SPACE<br/><font size=6.5>PUBLIC COMMENT BEEP</font></b>", free_space_style))
+                else:
+                    formatted_row.append(Paragraph(cell, cell_style))
+            formatted_data.append(formatted_row)
+
+        table = Table(formatted_data, colWidths=[102]*5, rowHeights=[34] + [100]*5)
+        table.setStyle(TableStyle([
+            ('BACKGROUND', (0, 0), (-1, 0), colors.black),
+            ('ALIGN', (0, 0), (-1, -1), 'CENTER'),
+            ('VALIGN', (0, 0), (-1, -1), 'MIDDLE'),
+            ('BACKGROUND', (0, 1), (-1, -1), colors.white),
+            ('TOPPADDING', (0, 0), (-1, -1), 6),
+            ('BOTTOMPADDING', (0, 0), (-1, -1), 6),
+            ('LEFTPADDING', (0, 0), (-1, -1), 6),
+            ('RIGHTPADDING', (0, 0), (-1, -1), 6),
+            ('INNERGRID', (0, 0), (-1, -1), 1, colors.black),
+            ('BOX', (0, 0), (-1, -1), 2, colors.black),
+            ('BACKGROUND', (2, 3), (2, 3), colors.HexColor('#E5E5E5')),
+        ]))
+
+        story.append(Paragraph("<b>UTAH WILDLIFE BOARD BINGO</b>", title_style))
+        story.append(Spacer(1, 4))
+        story.append(Paragraph(f"Mark each square live during the meeting. • Source: {doc_title} • Card #{card_idx + 1}", subtitle_style))
+        story.append(Spacer(1, 12))
+        story.append(table)
+        story.append(Spacer(1, 10))
+        story.append(Paragraph("Official Meeting Bingo Card • 5 in a row horizontally, vertically, or diagonally wins", footer_style))
+
+        # Add page break if it's not the last card
+        if card_idx < total_cards - 1:
+            story.append(PageBreak())
 
     doc.build(story)
     buffer.seek(0)
     return buffer
 
+# Fetch cached text instantly on load
+cached_text, doc_name = fetch_latest_utah_doc()
+st.info(f"📄 **Active Source Document:** {doc_name}")
 
-# --- SINGLE BUTTON GENERATION ---
-if st.button("🎲 Generate Bingo Card", type="primary"):
-    with st.spinner("Fetching latest agenda and crafting card..."):
+# Quantity Input Box
+num_cards = st.number_input("How many unique Bingo cards do you want to generate?", min_value=1, max_value=20, value=1, step=1)
+
+# --- GENERATION TRIGGER ---
+if st.button("🎲 Generate Bingo Cards", type="primary"):
+    with st.spinner(f"Analyzing agenda and generating {num_cards} unique bingo card(s)..."):
         try:
-            agenda_text, last_updated_date = get_agenda_content_and_date(DEFAULT_AGENDA_URL)
             client = genai.Client(api_key=st.secrets["GEMINI_API_KEY"])
-            
-            prompt = f"""
-            You are generating bingo cards for a state Board of Wildlife Resources meeting.
-            Analyze the following meeting agenda:
-            
-            {agenda_text[:4000]}
 
-            Generate EXACTLY 16 BROADER, SHORT, EASY-TO-TRIGGER phrases (max 2-4 words each) based on the topics in this agenda or common public comment habits.
-            
-            CRITICAL FORMATTING RULES:
-            1. If spoken/yelled out by a person, wrap in quotes: "Spoken Phrase"
-            2. If an action, general topic, or fact, wrap in bold: <b>Action or Topic</b>
-            
-            Return ONLY a raw JSON array of 16 strings.
-            Example format: ["\"I disagree\"", "<b>CWD mentioned</b>", "<b>Dog hunting debate</b>", "\"Quick question\""]
-            """
-
-            response = call_gemini_with_retry(client, prompt)
-            
-            # Safe extraction check
             ai_phrases = []
-            if response and hasattr(response, 'text') and response.text:
-                try:
-                    raw_json = response.text.strip().replace("```json", "").replace("```", "")
-                    ai_phrases = json.loads(raw_json)
-                except Exception:
+            if cached_text.strip():
+                prompt = f"""
+                You are generating bingo cards for Utah Wildlife Board / RAC meetings.
+                Analyze this text extracted from Utah DWR's latest meeting document:
+                
+                {cached_text[:4000]}
+
+                Generate EXACTLY 16 BROADER, SHORT, EASY-TO-TRIGGER phrases (max 2-4 words each) based on topics in this agenda or common public comment habits.
+                
+                CRITICAL FORMATTING RULES:
+                1. If spoken/yelled out by a person, wrap in quotes: "Spoken Phrase"
+                2. If an action, general topic, or fact, wrap in bold: <b>Action or Topic</b>
+                
+                Return ONLY a raw JSON array of 16 strings.
+                Example format: ["\"I disagree\"", "<b>CWD mentioned</b>", "<b>Dog hunting debate</b>", "\"Quick question\""]
+                """
+
+                response = call_gemini_with_retry(client, prompt)
+                
+                if response and hasattr(response, 'text') and response.text:
+                    try:
+                        raw_json = response.text.strip().replace("```json", "").replace("```", "")
+                        ai_phrases = json.loads(raw_json)
+                    except Exception:
+                        ai_phrases = FALLBACK_AI_TROPES
+                else:
                     ai_phrases = FALLBACK_AI_TROPES
             else:
                 ai_phrases = FALLBACK_AI_TROPES
 
-            # Fallback if fewer than 16 phrases returned
             if len(ai_phrases) < 16:
                 ai_phrases.extend(FALLBACK_AI_TROPES[:(16 - len(ai_phrases))])
 
-            # Combine 8 Hardcoded Core Tropes + 16 AI Agenda Phrases
-            all_phrases = HARDCODED_CORE_TROPES + ai_phrases
-            selected_phrases = all_phrases[:24]
-            random.shuffle(selected_phrases)
+            all_phrases_pool = HARDCODED_CORE_TROPES + ai_phrases
 
-            # Build 5x5 Matrix
-            matrix = []
-            idx = 0
-            for r in range(5):
-                row = []
-                for c in range(5):
-                    if r == 2 and c == 2:
-                        row.append("FREE SPACE")
-                    else:
-                        row.append(selected_phrases[idx])
-                        idx += 1
-                matrix.append(row)
+            # Generate N unique matrices
+            generated_matrices = []
+            for i in range(num_cards):
+                # Shuffle pool independently for every card
+                current_pool = list(all_phrases_pool[:24])
+                random.shuffle(current_pool)
+                
+                matrix = []
+                idx = 0
+                for r in range(5):
+                    row = []
+                    for c in range(5):
+                        if r == 2 and c == 2:
+                            row.append("FREE SPACE")
+                        else:
+                            row.append(current_pool[idx])
+                            idx += 1
+                    matrix.append(row)
+                generated_matrices.append(matrix)
 
-            st.success(f"Bingo Card Ready! (Agenda Updated: {last_updated_date})")
+            st.success(f"{num_cards} Bingo Card(s) Ready!")
 
-            # On-Screen Preview
+            # Display Preview of Card #1 on screen
+            st.subheader("Card #1 Preview")
             html_grid = ['<div class="bingo-grid">']
             for letter in ["B", "I", "N", "G", "O"]:
                 html_grid.append(f'<div class="bingo-header">{letter}</div>')
-            for r_i, row in enumerate(matrix):
+            for r_i, row in enumerate(generated_matrices[0]):
                 for c_i, cell in enumerate(row):
                     if r_i == 2 and c_i == 2:
                         html_grid.append('<div class="bingo-cell bingo-free">FREE SPACE<br/><small>Timer Beep</small></div>')
@@ -311,12 +330,12 @@ if st.button("🎲 Generate Bingo Card", type="primary"):
 
             st.markdown("".join(html_grid), unsafe_allow_html=True)
 
-            # Download PDF
-            pdf_data = create_bw_square_pdf(matrix, last_updated_date)
+            # Download Multipage PDF
+            pdf_data = create_multi_card_pdf(generated_matrices, doc_name)
             st.download_button(
-                label="📄 Download Printable PDF",
+                label=f"📄 Download Printable PDF ({num_cards} Card{'s' if num_cards > 1 else ''})",
                 data=pdf_data,
-                file_name="wildlife_board_bingo.pdf",
+                file_name="utah_wildlife_board_bingo_set.pdf",
                 mime="application/pdf"
             )
 
