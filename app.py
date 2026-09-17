@@ -5,6 +5,7 @@ import io
 import re
 import requests
 import pypdf
+from datetime import datetime
 from bs4 import BeautifulSoup
 from google import genai
 from reportlab.lib.pagesizes import letter
@@ -104,38 +105,49 @@ if "GEMINI_API_KEY" not in st.secrets:
     st.error("Missing Gemini API Key in Streamlit Secrets!")
     st.stop()
 
-# Extract strict meeting dates from text or parent containers
-def extract_meeting_date(text):
-    # Regex to catch dates like "Jan 15, 2026", "September 8", "09/15/2026"
-    date_match = re.search(
+# Helper function to extract and convert dates to datetime objects for sorting
+def parse_date_to_sortable(text):
+    # Search for dates like "Jan 15, 2026", "September 8, 2025", "09/15/2026"
+    match = re.search(
         r'(?:\b(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*\s+\d{1,2}(?:st|nd|rd|th)?,?\s*(?:\d{4})?)|'
         r'(?:\d{1,2}[-/\.]\d{1,2}[-/\.]\d{2,4})', 
         text, 
         re.IGNORECASE
     )
-    if date_match:
-        return date_match.group(0).strip()
-    return None
+    if match:
+        date_str = match.group(0).strip()
+        # Clean ordinal suffixes (e.g. 15th -> 15)
+        clean_str = re.sub(r'(\d+)(st|nd|rd|th)', r'\1', date_str)
+        
+        # Try common datetime patterns
+        for fmt in ("%b %d, %Y", "%b %d %Y", "%B %d, %Y", "%B %d %Y", "%m/%d/%Y", "%m-%d-%Y", "%b %d", "%B %d"):
+            try:
+                parsed_dt = datetime.strptime(clean_str, fmt)
+                # If year wasn't specified, assume current year (2026)
+                if parsed_dt.year == 1900:
+                    parsed_dt = parsed_dt.replace(year=2026)
+                return parsed_dt, parsed_dt.strftime("%b %d, %Y")
+            except ValueError:
+                continue
+                
+    return datetime(1970, 1, 1), text[:35] if text else "Upcoming Meeting"
 
-# 1. DATE-FIRST SCRAPER
+# 1. DATE-FIRST SCRAPER WITH SORTING (Newest to Oldest)
 @st.cache_data(ttl=43200)
 def discover_utah_docs_by_date():
     headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
-    grouped_dates = {}
+    temp_grouped = {}
     
     try:
         response = requests.get(UTAH_MEETINGS_URL, headers=headers, timeout=10)
         if response.status_code == 200:
             soup = BeautifulSoup(response.content, "html.parser")
-            
-            # Scan table rows, list items, and paragraph sections
             containers = soup.find_all(["tr", "li", "p", "div"])
             
             for container in containers:
                 container_text = container.text.strip()
-                detected_date = extract_meeting_date(container_text)
+                parsed_dt, display_date = parse_date_to_sortable(container_text)
                 
-                # Search for PDF links inside containers that have a date
                 pdf_links = container.find_all("a", href=True)
                 for a_tag in pdf_links:
                     href = a_tag["href"]
@@ -145,37 +157,37 @@ def discover_utah_docs_by_date():
                     if href_lower.endswith(".pdf"):
                         full_url = href if href.startswith("http") else f"https://wildlife.utah.gov{href}"
                         
-                        # Determine document type
                         doc_type = "Agenda"
                         if "packet" in href_lower or "packet" in link_text:
                             doc_type = "Packet"
                         elif "feedback" in href_lower or "feedback" in link_text:
                             doc_type = "Feedback"
-                        
-                        # Determine date grouping key
-                        date_key = detected_date if detected_date else extract_meeting_date(href)
-                        if not date_key:
-                            # Fallback to header text if no inline date was matched
-                            prev_header = container.find_previous(["h2", "h3", "h4"])
-                            if prev_header:
-                                date_key = extract_meeting_date(prev_header.text) or prev_header.text.strip()[:40]
-                            else:
-                                date_key = "Upcoming Board Meetings"
 
-                        if date_key not in grouped_dates:
-                            grouped_dates[date_key] = {}
+                        if parsed_dt not in temp_grouped:
+                            temp_grouped[parsed_dt] = {
+                                "display_name": display_date,
+                                "files": {}
+                            }
                         
-                        grouped_dates[date_key][doc_type] = full_url
+                        temp_grouped[parsed_dt]["files"][doc_type] = full_url
 
     except Exception:
         pass
     
-    if not grouped_dates:
-        grouped_dates["Utah Wildlife Board Schedule"] = {
+    # Sort dates in descending order (Newest to Oldest)
+    sorted_dates = sorted(temp_grouped.keys(), reverse=True)
+    
+    final_grouped = {}
+    for dt in sorted_dates:
+        display_label = temp_grouped[dt]["display_name"]
+        final_grouped[display_label] = temp_grouped[dt]["files"]
+
+    if not final_grouped:
+        final_grouped["Utah Wildlife Board Schedule"] = {
             "Agenda": "https://wildlife.utah.gov/pdf/meetings/2026_schedule.pdf"
         }
         
-    return grouped_dates
+    return final_grouped
 
 def download_pdf_bytes(pdf_url):
     headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
@@ -309,8 +321,8 @@ with c2:
         st.cache_data.clear()
         st.rerun()
 
-# Clean Date Selection Dropdown
-selected_date = st.selectbox("Choose a meeting date from Utah DWR:", list(grouped_docs.keys()))
+# Sorted Date Selection Dropdown (Newest to Oldest)
+selected_date = st.selectbox("Choose meeting date (newest first):", list(grouped_docs.keys()))
 
 # Filter available source files ONLY for the selected date
 available_files = grouped_docs[selected_date]
