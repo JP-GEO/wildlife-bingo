@@ -97,7 +97,7 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 st.title("🏔️ Utah Wildlife Board Bingo")
-st.write("Generates instant 5x5 Bingo cards automatically using official meeting agendas, packets, and feedback from Utah DWR.")
+st.write("Generates instant 5x5 Bingo cards automatically using official meeting agendas from Utah DWR.")
 
 # Secrets Validation
 if "GEMINI_API_KEY" not in st.secrets:
@@ -112,12 +112,11 @@ def extract_flexible_date(text_context):
         return match.group(0).strip()
     return None
 
-# 1. SCRAPER FILTERED STRICTLY TO AGENDA / PACKET / FEEDBACK
+# 1. SCRAPER FILTERED EXCLUSIVELY TO "AGENDA" DOCUMENTS
 @st.cache_data(ttl=43200)
-def discover_filtered_meeting_documents():
+def discover_agenda_documents_only():
     headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
     documents_map = {}
-    target_keywords = ["agenda", "packet", "feedback"]
     
     try:
         response = requests.get(UTAH_MEETINGS_URL, headers=headers, timeout=10)
@@ -134,8 +133,8 @@ def discover_filtered_meeting_documents():
                 if href_lower.endswith(".pdf"):
                     combined_target = f"{href_lower} {link_text_lower}"
                     
-                    # Check 2: MUST contain agenda, packet, or feedback in title/URL
-                    if any(kw in combined_target for kw in target_keywords):
+                    # Check 2: STRICTLY require "agenda" in title or URL
+                    if "agenda" in combined_target:
                         full_url = href if href.startswith("http") else f"https://wildlife.utah.gov{href}"
                         
                         parent = a_tag.find_parent(["tr", "li", "p", "div"])
@@ -146,7 +145,7 @@ def discover_filtered_meeting_documents():
                         combined_context = f"{link_text} {parent_text} {heading_text} {href}"
                         detected_date = extract_flexible_date(combined_context)
                         
-                        doc_label = link_text if len(link_text) > 3 else "Document"
+                        doc_label = link_text if len(link_text) > 3 else "Agenda PDF"
                         
                         if detected_date:
                             display_key = f"📅 {detected_date} — {doc_label}"
@@ -287,56 +286,56 @@ def create_multi_card_pdf(matrices_list, doc_title):
     return buffer
 
 # --- UI LAYOUT ---
-doc_options = discover_filtered_meeting_documents()
+doc_options = discover_agenda_documents_only()
 
 c1, c2 = st.columns([4, 1])
 with c1:
-    st.subheader("1. Select Agendas, Packets & Feedback")
+    st.subheader("1. Select Agenda Document")
 with c2:
     if st.button("🔄 Refresh"):
         st.cache_data.clear()
         st.rerun()
 
-# Dropdown filtering strictly to agenda/packet/feedback PDFs
-selected_doc_title = st.selectbox("Choose a meeting document from Utah DWR:", list(doc_options.keys()))
+# Dropdown filtering strictly to agenda PDFs
+selected_doc_title = st.selectbox("Choose a meeting agenda from Utah DWR:", list(doc_options.keys()))
 selected_pdf_url = doc_options[selected_doc_title]
 
-st.subheader("2. Source Document Download")
+st.subheader("2. Agenda Download")
 pdf_bytes = download_pdf_bytes(selected_pdf_url)
 
 if pdf_bytes:
     st.download_button(
-        label="📥 Download Selected PDF",
+        label="📥 Download Selected Agenda PDF",
         data=pdf_bytes,
-        file_name="selected_utah_dwr_document.pdf",
+        file_name="selected_utah_dwr_agenda.pdf",
         mime="application/pdf"
     )
     document_text = extract_pdf_text_from_bytes(pdf_bytes)
 else:
     document_text = ""
-    st.info("Could not fetch document content.")
+    st.info("Could not fetch agenda content.")
 
 # Fallback Upload Option
-with st.expander("➕ Optional: Add Local PDF File"):
+with st.expander("➕ Optional: Add Local Agenda PDF"):
     custom_pdf = st.file_uploader("Upload a local PDF file instead", type=["pdf"])
     if custom_pdf:
         custom_text = extract_pdf_text_from_bytes(custom_pdf.read())
         if custom_text:
             document_text = custom_text
-            st.success("Custom PDF loaded as primary source!")
+            st.success("Custom Agenda PDF loaded as primary source!")
 
 st.subheader("3. Card Quantity")
 num_cards = st.number_input("How many unique Bingo cards do you want to generate?", min_value=1, max_value=20, value=1, step=1)
 
 # Generation Action
 if st.button("🎲 Generate Bingo Cards", type="primary"):
-    with st.spinner("Extracting topics from document and generating card(s)..."):
+    with st.spinner("Extracting topics from agenda and generating card(s)..."):
         try:
             client = genai.Client(api_key=st.secrets["GEMINI_API_KEY"])
 
             prompt = f"""
             You are generating bingo cards for Utah Wildlife Board and Regional Advisory Council (RAC) meetings.
-            Analyze this text extracted from the selected meeting document ({selected_doc_title}):
+            Analyze this text extracted from the selected meeting agenda ({selected_doc_title}):
             
             {document_text[:5000]}
 
