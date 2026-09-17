@@ -22,33 +22,33 @@ DEFAULT_AGENDA_URL = "https://wildlife.utah.gov/pdf/meetings/board/2026-09-17-bo
 # 8 Guaranteed Core Tropes
 HARDCODED_CORE_TROPES = [
     "\"Can you hear me now?\"",
-    "<b>Public comment timer beep</b>",
+    "<b>Interrupted mid-sentence</b>",
     "<b>Unsolicited history lesson</b>",
     "<b>Microphone feedback screech</b>",
-    "\"I've hunted here for 40 years\"",
-    "<b>Board member food coma</b>",
-    "<b>Unanimous vote in < 5 sec</b>",
+    "\"...I've hunted here for x # years...\"",
+    "<b>Speaker starts tearing up</b>",
+    "<b>***Technical difficulties***</b>",
     "\"With all due respect...\""
 ]
 
 # 16 Fallback Tropes in case AI response is empty or blocked
 FALLBACK_AI_TROPES = [
-    "<b>CWD regulations discussed</b>",
+    "<b>I dont have those numbers</b>",
     "\"I have a quick question\"",
     "<b>Dog hunting debate</b>",
     "<b>Public commenter over time</b>",
     "<b>Slide deck unreadable</b>",
     "\"Back in the good old days\"",
     "<b>Bag limit adjustment</b>",
-    "<b>Water rights rant</b>",
-    "\"We need more study\"",
+    "<b>...family hunting anecdote...</b>",
+    "\"We need to look that up\"",
     "<b>Boat ramp access fees</b>",
     "<b>Dramatic sigh in mic</b>",
     "\"I move to approve\"",
-    "<b>Secret spot described</b>",
+    "<b>I second the motion</b>",
     "\"Is this item open?\"",
-    "<b>Accidental background bark</b>",
-    "<b>Presenter skips 20 slides</b>"
+    "<b>Background *coughing*</b>",
+    "<b>Presenter mixes up their slides</b>"
 ]
 
 # High-contrast Black & White styling
