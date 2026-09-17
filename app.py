@@ -96,53 +96,55 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 st.title("🏔️ Utah Wildlife Board Bingo")
-st.write("Generates instant 5x5 Bingo cards automatically using active meeting documents from Utah DWR.")
+st.write("Generates instant 5x5 Bingo cards using official meeting agendas from Utah DWR.")
 
 # API Key Check
 if "GEMINI_API_KEY" not in st.secrets:
     st.error("Missing Gemini API Key in Streamlit Secrets!")
     st.stop()
 
-# 1. LIGHTWEIGHT SCRAPER WITH CACHING (Runs once every 12 hours)
+# 1. SCRAPE ALL AVAILABLE MEETING DOCS (Cached 12 hrs)
 @st.cache_data(ttl=43200)
-def fetch_latest_utah_doc():
+def discover_utah_docs():
+    """Finds all available PDF agendas and packets on wildlife.utah.gov/meetings."""
     headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
+    doc_map = {}
     try:
         response = requests.get(UTAH_MEETINGS_URL, headers=headers, timeout=10)
-        if response.status_code != 200:
-            return "", "Utah DWR Site Unavailable"
+        if response.status_code == 200:
+            soup = BeautifulSoup(response.content, "html.parser")
+            for a_tag in soup.find_all("a", href=True):
+                href = a_tag["href"]
+                text = a_tag.text.strip()
+                if href.endswith(".pdf") and len(text) > 3:
+                    full_url = href if href.startswith("http") else f"https://wildlife.utah.gov{href}"
+                    doc_map[f"{text}"] = full_url
+    except Exception:
+        pass
+    
+    # Default fallback if scraping encounters an issue
+    if not doc_map:
+        doc_map["Default Utah Board Agenda"] = "https://wildlife.utah.gov/pdf/meetings/2026_schedule.pdf"
+        
+    return doc_map
 
-        soup = BeautifulSoup(response.content, "html.parser")
-        pdf_url = None
-        doc_title = "Utah DWR Agenda"
-
-        for a_tag in soup.find_all("a", href=True):
-            href = a_tag["href"]
-            text = a_tag.text.lower()
-            if href.endswith(".pdf"):
-                if "agenda" in text or "rac" in text or "packet" in text or "summary" in text:
-                    pdf_url = href if href.startswith("http") else f"https://wildlife.utah.gov{href}"
-                    doc_title = a_tag.text.strip()
-                    break
-
-        if not pdf_url:
-            return "", "No Active PDF Found (Using Fallbacks)"
-
-        pdf_res = requests.get(pdf_url, headers=headers, timeout=10)
-        pdf_file = io.BytesIO(pdf_res.content)
+# Helper function to download and extract text from selected PDF
+def extract_pdf_text(pdf_url):
+    headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
+    try:
+        res = requests.get(pdf_url, headers=headers, timeout=10)
+        pdf_file = io.BytesIO(res.content)
         reader = pypdf.PdfReader(pdf_file)
-
+        
         extracted_text = ""
-        max_pages = min(len(reader.pages), 5)
+        max_pages = min(len(reader.pages), 5) # Read first 5 pages max
         for i in range(max_pages):
             text = reader.pages[i].extract_text()
             if text:
                 extracted_text += text + "\n"
-
-        return extracted_text[:4000], doc_title
-
-    except Exception as e:
-        return "", f"Scraping Fallback: {e}"
+        return extracted_text[:4000]
+    except Exception:
+        return ""
 
 # 2. RETRY WRAPPER FOR GEMINI
 @retry(
@@ -230,13 +232,12 @@ def create_multi_card_pdf(matrices_list, doc_title):
 
         story.append(Paragraph("<b>UTAH WILDLIFE BOARD BINGO</b>", title_style))
         story.append(Spacer(1, 4))
-        story.append(Paragraph(f"Mark each square live during the meeting. • Source: {doc_title} • Card #{card_idx + 1}", subtitle_style))
+        story.append(Paragraph(f"Mark each square live during the meeting. • Source: {doc_title[:50]} • Card #{card_idx + 1}", subtitle_style))
         story.append(Spacer(1, 12))
         story.append(table)
         story.append(Spacer(1, 10))
         story.append(Paragraph("Official Meeting Bingo Card • 5 in a row horizontally, vertically, or diagonally wins", footer_style))
 
-        # Add page break if it's not the last card
         if card_idx < total_cards - 1:
             story.append(PageBreak())
 
@@ -244,26 +245,31 @@ def create_multi_card_pdf(matrices_list, doc_title):
     buffer.seek(0)
     return buffer
 
-# Fetch cached text instantly on load
-cached_text, doc_name = fetch_latest_utah_doc()
-st.info(f"📄 **Active Source Document:** {doc_name}")
+# Discover available docs from Utah DWR website
+available_docs = discover_utah_docs()
 
-# Quantity Input Box
-num_cards = st.number_input("How many unique Bingo cards do you want to generate?", min_value=1, max_value=20, value=1, step=1)
+# UI Controls
+st.subheader("1. Select Active Document Source")
+selected_doc_name = st.selectbox("Choose meeting document to analyze:", list(available_docs.keys()))
+selected_doc_url = available_docs[selected_doc_name]
+
+st.subheader("2. Card Quantity")
+num_cards = st.number_input("How many unique Bingo cards do you want to print?", min_value=1, max_value=20, value=1, step=1)
 
 # --- GENERATION TRIGGER ---
 if st.button("🎲 Generate Bingo Cards", type="primary"):
-    with st.spinner(f"Analyzing agenda and generating {num_cards} unique bingo card(s)..."):
+    with st.spinner(f"Reading '{selected_doc_name}' and generating {num_cards} card(s)..."):
         try:
+            doc_text = extract_pdf_text(selected_doc_url)
             client = genai.Client(api_key=st.secrets["GEMINI_API_KEY"])
 
             ai_phrases = []
-            if cached_text.strip():
+            if doc_text.strip():
                 prompt = f"""
                 You are generating bingo cards for Utah Wildlife Board / RAC meetings.
-                Analyze this text extracted from Utah DWR's latest meeting document:
+                Analyze this text extracted from the active meeting document:
                 
-                {cached_text[:4000]}
+                {doc_text}
 
                 Generate EXACTLY 16 BROADER, SHORT, EASY-TO-TRIGGER phrases (max 2-4 words each) based on topics in this agenda or common public comment habits.
                 
@@ -272,7 +278,6 @@ if st.button("🎲 Generate Bingo Cards", type="primary"):
                 2. If an action, general topic, or fact, wrap in bold: <b>Action or Topic</b>
                 
                 Return ONLY a raw JSON array of 16 strings.
-                Example format: ["\"I disagree\"", "<b>CWD mentioned</b>", "<b>Dog hunting debate</b>", "\"Quick question\""]
                 """
 
                 response = call_gemini_with_retry(client, prompt)
@@ -296,7 +301,6 @@ if st.button("🎲 Generate Bingo Cards", type="primary"):
             # Generate N unique matrices
             generated_matrices = []
             for i in range(num_cards):
-                # Shuffle pool independently for every card
                 current_pool = list(all_phrases_pool[:24])
                 random.shuffle(current_pool)
                 
@@ -315,7 +319,7 @@ if st.button("🎲 Generate Bingo Cards", type="primary"):
 
             st.success(f"{num_cards} Bingo Card(s) Ready!")
 
-            # Display Preview of Card #1 on screen
+            # Display Preview of Card #1
             st.subheader("Card #1 Preview")
             html_grid = ['<div class="bingo-grid">']
             for letter in ["B", "I", "N", "G", "O"]:
@@ -331,7 +335,7 @@ if st.button("🎲 Generate Bingo Cards", type="primary"):
             st.markdown("".join(html_grid), unsafe_allow_html=True)
 
             # Download Multipage PDF
-            pdf_data = create_multi_card_pdf(generated_matrices, doc_name)
+            pdf_data = create_multi_card_pdf(generated_matrices, selected_doc_name)
             st.download_button(
                 label=f"📄 Download Printable PDF ({num_cards} Card{'s' if num_cards > 1 else ''})",
                 data=pdf_data,
