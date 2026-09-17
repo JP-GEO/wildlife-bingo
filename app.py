@@ -2,8 +2,10 @@ import streamlit as st
 import json
 import random
 import io
+import re
 import requests
 import pypdf
+from bs4 import BeautifulSoup
 from google import genai
 from reportlab.lib.pagesizes import letter
 from reportlab.platypus import SimpleDocTemplate, Table, TableStyle, Paragraph, Spacer, PageBreak
@@ -12,9 +14,11 @@ from reportlab.lib import colors
 from tenacity import retry, stop_after_attempt, wait_random_exponential
 
 # Page Setup
-st.set_page_config(page_title="Wildlife Board Bingo", layout="centered")
+st.set_page_config(page_title="Utah Wildlife Board Bingo", layout="centered")
 
-# --- CORE HARDCODED TROPES ---
+UTAH_MEETINGS_URL = "https://wildlife.utah.gov/meetings"
+
+# --- CORE PUBLIC BOARD TROPES ---
 HARDCODED_CORE_TROPES = [
     "\"Can you hear me now?\"",
     "<b>Interrupted mid-sentence</b>",
@@ -92,67 +96,86 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
-st.title("Board of Wildlife Resources Bingo")
-st.write("Generate printable 5x5 square Bingo cards from any meeting agenda PDF or text.")
+st.title("🏔️ Utah Wildlife Board Bingo")
+st.write("Generates instant 5x5 Bingo cards automatically using official meeting documents from Utah DWR.")
 
 # API Key Check
 if "GEMINI_API_KEY" not in st.secrets:
     st.error("Missing Gemini API Key in Streamlit Secrets!")
     st.stop()
 
-# Helper function to extract text from PDF bytes
-def extract_text_from_pdf_bytes(pdf_bytes):
-    pdf_file = io.BytesIO(pdf_bytes)
-    reader = pypdf.PdfReader(pdf_file)
-    extracted_text = ""
-    for page in reader.pages:
-        text = page.extract_text()
-        if text:
-            extracted_text += text + "\n"
-    return extracted_text
+# Helper function to extract dates from text or URLs
+def extract_date_from_string(text):
+    date_match = re.search(r'(?:\b(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*\s+\d{1,2}(?:st|nd|rd|th)?,?\s+\d{4})|(?:\d{4}[-_\.]\d{2}[-_\.]\d{2})|(?:\d{1,2}[-_\.]\d{1,2}[-_\.]\d{2,4})', text, re.IGNORECASE)
+    return date_match.group(0) if date_match else "Upcoming / General Meetings"
 
-# Input Options Tab Bar
-tab1, tab2, tab3 = st.tabs(["🌐 PDF Web Link", "📁 Upload PDF", "✍️ Paste Text"])
+# Date-grouped scraper for Agendas, Packets, and Feedback
+@st.cache_data(ttl=43200)
+def discover_utah_docs_by_date():
+    headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
+    grouped_dates = {}
+    
+    try:
+        response = requests.get(UTAH_MEETINGS_URL, headers=headers, timeout=10)
+        if response.status_code == 200:
+            soup = BeautifulSoup(response.content, "html.parser")
+            for a_tag in soup.find_all("a", href=True):
+                href = a_tag["href"].lower()
+                text = a_tag.text.strip()
+                combined_target = f"{href} {text.lower()}"
+                
+                if href.endswith(".pdf"):
+                    doc_type = None
+                    if "agenda" in combined_target:
+                        doc_type = "Agenda"
+                    elif "packet" in combined_target:
+                        doc_type = "Packet"
+                    elif "feedback" in combined_target:
+                        doc_type = "Feedback"
+                    
+                    if doc_type:
+                        full_url = a_tag["href"] if a_tag["href"].startswith("http") else f"https://wildlife.utah.gov{a_tag['href']}"
+                        parent_text = a_tag.parent.text if a_tag.parent else ""
+                        detected_date = extract_date_from_string(f"{text} {parent_text} {href}")
+                        
+                        if detected_date not in grouped_dates:
+                            grouped_dates[detected_date] = {}
+                        grouped_dates[detected_date][doc_type] = full_url
+    except Exception:
+        pass
+    
+    if not grouped_dates:
+        grouped_dates["Default Board Meeting"] = {
+            "Agenda": "https://wildlife.utah.gov/pdf/meetings/2026_schedule.pdf"
+        }
+        
+    return grouped_dates
 
-agenda_text = ""
+# Download raw binary for direct document downloading
+def download_pdf_bytes(pdf_url):
+    headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
+    try:
+        res = requests.get(pdf_url, headers=headers, timeout=10)
+        if res.status_code == 200:
+            return res.content
+    except Exception:
+        pass
+    return None
 
-with tab1:
-    pdf_url = st.text_input("Paste URL to Agenda PDF:", placeholder="https://wildlife.utah.gov/pdf/meetings/agenda.pdf")
-    if pdf_url:
-        try:
-            res = requests.get(pdf_url, timeout=10)
-            if res.status_code == 200:
-                extracted = extract_text_from_pdf_bytes(res.content)
-                if extracted.strip():
-                    agenda_text = extracted
-                    st.success("Successfully fetched and read PDF from URL!")
-                else:
-                    st.error("Fetched PDF appears to be empty or image-only.")
-            else:
-                st.error(f"Failed to fetch PDF (HTTP Status {res.status_code}).")
-        except Exception as e:
-            st.error(f"Error fetching URL: {e}")
-
-with tab2:
-    uploaded_file = st.file_uploader("Upload Agenda PDF File", type=["pdf"])
-    if uploaded_file:
-        try:
-            extracted = extract_text_from_pdf_bytes(uploaded_file.read())
-            if extracted.strip():
-                agenda_text = extracted
-                st.success("PDF uploaded and processed successfully!")
-            else:
-                st.error("Uploaded PDF appears to be empty or image-only.")
-        except Exception as e:
-            st.error(f"Error reading uploaded PDF: {e}")
-
-with tab3:
-    pasted_text = st.text_area("Paste Agenda Text:", height=180, placeholder="Paste meeting agenda items here...")
-    if pasted_text.strip():
-        agenda_text = pasted_text
-
-# Card Quantity
-num_cards = st.number_input("How many unique Bingo cards do you want to print?", min_value=1, max_value=20, value=1, step=1)
+# Extract text from PDF bytes
+def extract_pdf_text_from_bytes(pdf_bytes):
+    try:
+        pdf_file = io.BytesIO(pdf_bytes)
+        reader = pypdf.PdfReader(pdf_file)
+        extracted_text = ""
+        max_pages = min(len(reader.pages), 5)
+        for i in range(max_pages):
+            text = reader.pages[i].extract_text()
+            if text:
+                extracted_text += text + "\n"
+        return extracted_text[:3000]
+    except Exception:
+        return ""
 
 # Retry Wrapper for Gemini API
 @retry(
@@ -167,7 +190,7 @@ def call_gemini_with_retry(client, prompt):
     )
 
 # PDF Creator
-def create_multi_card_pdf(matrices_list):
+def create_multi_card_pdf(matrices_list, doc_title):
     buffer = io.BytesIO()
     doc = SimpleDocTemplate(
         buffer, pagesize=letter,
@@ -238,9 +261,9 @@ def create_multi_card_pdf(matrices_list):
             ('BACKGROUND', (2, 3), (2, 3), colors.HexColor('#E5E5E5')),
         ]))
 
-        story.append(Paragraph("<b>BOARD OF WILDLIFE RESOURCES BINGO</b>", title_style))
+        story.append(Paragraph("<b>UTAH WILDLIFE BOARD BINGO</b>", title_style))
         story.append(Spacer(1, 4))
-        story.append(Paragraph(f"Mark each square live during the meeting. • Card #{card_idx + 1}", subtitle_style))
+        story.append(Paragraph(f"Mark each square live during the meeting. • Date: {doc_title} • Card #{card_idx + 1}", subtitle_style))
         story.append(Spacer(1, 12))
         story.append(table)
         story.append(Spacer(1, 10))
@@ -253,97 +276,134 @@ def create_multi_card_pdf(matrices_list):
     buffer.seek(0)
     return buffer
 
+# Discover grouped documents by date
+grouped_docs = discover_utah_docs_by_date()
 
-# --- GENERATION TRIGGER ---
+# UI Layout
+st.subheader("1. Select Meeting Date")
+selected_date = st.selectbox("Choose meeting date:", list(grouped_docs.keys()))
+available_files = grouped_docs[selected_date]
+
+# File Download Options
+st.subheader("2. Available Source Documents for Selected Date")
+cols = st.columns(3)
+
+file_texts = []
+for idx, doc_type in enumerate(["Agenda", "Packet", "Feedback"]):
+    with cols[idx]:
+        if doc_type in available_files:
+            file_bytes = download_pdf_bytes(available_files[doc_type])
+            if file_bytes:
+                st.download_button(
+                    label=f"📥 Download {doc_type}",
+                    data=file_bytes,
+                    file_name=f"{selected_date}_{doc_type}.pdf",
+                    mime="application/pdf"
+                )
+                text_content = extract_pdf_text_from_bytes(file_bytes)
+                if text_content:
+                    file_texts.append(f"--- {doc_type.upper()} CONTENT ---\n" + text_content)
+        else:
+            st.info(f"No {doc_type} PDF")
+
+combined_date_text = "\n\n".join(file_texts)
+
+st.subheader("3. Card Quantity")
+num_cards = st.number_input("How many unique Bingo cards do you want to generate?", min_value=1, max_value=20, value=1, step=1)
+
+# Generation Action
 if st.button("🎲 Generate Bingo Cards", type="primary"):
-    if not agenda_text.strip():
-        st.warning("Please provide an agenda first (paste URL, upload PDF, or paste text)!")
-    else:
-        with st.spinner("Analyzing agenda and crafting card(s)..."):
-            try:
-                client = genai.Client(api_key=st.secrets["GEMINI_API_KEY"])
+    with st.spinner(f"Analyzing all documents for {selected_date} and generating {num_cards} card(s)..."):
+        try:
+            client = genai.Client(api_key=st.secrets["GEMINI_API_KEY"])
 
+            ai_phrases = []
+            if combined_date_text.strip():
                 prompt = f"""
-                You are generating bingo cards for a state Board of Wildlife Resources meeting.
-                Analyze the following meeting agenda:
+                You are generating bingo cards for Utah Wildlife Board / RAC meetings.
+                Analyze this combined text extracted from official meeting documents for {selected_date}:
                 
-                {agenda_text[:4000]}
+                {combined_date_text[:4000]}
 
-                Return EXACTLY 16 short, easy-to-trigger phrases (2-4 words each) representing meeting tropes, audience comments, or specific topics found in this agenda.
+                Generate EXACTLY 16 BROADER, SHORT, EASY-TO-TRIGGER phrases (max 2-4 words each) based on topics in this agenda/packet or common public comment habits.
                 
-                CRITICAL FORMATTING RULES FOR PHRASES:
-                1. If a phrase is something spoken/yelled out by a person, wrap in quotation marks: "Spoken Phrase"
-                2. If a phrase is an action or topic, wrap in HTML bold tags: <b>Action or Topic</b>
+                CRITICAL FORMATTING RULES:
+                1. If spoken/yelled out by a person, wrap in quotes: "Spoken Phrase"
+                2. If an action, general topic, or fact, wrap in bold: <b>Action or Topic</b>
                 
                 Return ONLY a raw JSON array of 16 strings.
                 """
 
                 response = call_gemini_with_retry(client, prompt)
                 
-                ai_phrases = []
                 if response and hasattr(response, 'text') and response.text:
                     try:
                         raw_json = response.text.strip().replace("```json", "").replace("```", "")
-                        parsed = json.loads(raw_json)
-                        if isinstance(parsed, list):
-                            ai_phrases = [str(x) for x in parsed if isinstance(x, str)]
+                        parsed_list = json.loads(raw_json)
+                        if isinstance(parsed_list, list):
+                            ai_phrases = [str(x) for x in parsed_list if isinstance(x, str)]
+                        else:
+                            ai_phrases = list(FALLBACK_AI_TROPES)
                     except Exception:
                         ai_phrases = list(FALLBACK_AI_TROPES)
                 else:
                     ai_phrases = list(FALLBACK_AI_TROPES)
+            else:
+                ai_phrases = list(FALLBACK_AI_TROPES)
 
-                # Ensure 16 phrases
-                if len(ai_phrases) < 16:
-                    needed = 16 - len(ai_phrases)
-                    ai_phrases.extend(FALLBACK_AI_TROPES[:needed])
+            # Strict integer count safeguard
+            count_ai = int(len(ai_phrases))
+            if count_ai < 16:
+                needed = 16 - count_ai
+                ai_phrases.extend(FALLBACK_AI_TROPES[:needed])
 
-                all_phrases_pool = list(HARDCODED_CORE_TROPES) + list(ai_phrases)
+            all_phrases_pool = list(HARDCODED_CORE_TROPES) + list(ai_phrases)
 
-                # Generate N unique matrices
-                generated_matrices = []
-                card_count_int = int(num_cards)
-                for i in range(card_count_int):
-                    current_pool = list(all_phrases_pool[:24])
-                    random.shuffle(current_pool)
-                    
-                    matrix = []
-                    idx = 0
-                    for r in range(5):
-                        row = []
-                        for c in range(5):
-                            if r == 2 and c == 2:
-                                row.append("FREE SPACE")
-                            else:
-                                row.append(current_pool[idx])
-                                idx += 1
-                        matrix.append(row)
-                    generated_matrices.append(matrix)
-
-                st.success(f"{num_cards} Bingo Card(s) Ready!")
-
-                # Preview Card #1
-                st.subheader("Card #1 Preview")
-                html_grid = ['<div class="bingo-grid">']
-                for letter in ["B", "I", "N", "G", "O"]:
-                    html_grid.append(f'<div class="bingo-header">{letter}</div>')
-                for r_i, row in enumerate(generated_matrices[0]):
-                    for c_i, cell in enumerate(row):
-                        if r_i == 2 and c_i == 2:
-                            html_grid.append('<div class="bingo-cell bingo-free">FREE SPACE<br/><small>Timer Beep</small></div>')
+            # Generate N unique matrices
+            generated_matrices = []
+            card_count_int = int(num_cards)
+            for i in range(card_count_int):
+                current_pool = list(all_phrases_pool[:24])
+                random.shuffle(current_pool)
+                
+                matrix = []
+                idx = 0
+                for r in range(5):
+                    row = []
+                    for c in range(5):
+                        if r == 2 and c == 2:
+                            row.append("FREE SPACE")
                         else:
-                            html_grid.append(f'<div class="bingo-cell">{cell}</div>')
-                html_grid.append('</div>')
+                            row.append(current_pool[idx])
+                            idx += 1
+                    matrix.append(row)
+                generated_matrices.append(matrix)
 
-                st.markdown("".join(html_grid), unsafe_allow_html=True)
+            st.success(f"{num_cards} Bingo Card(s) Ready!")
 
-                # Download PDF
-                pdf_data = create_multi_card_pdf(generated_matrices)
-                st.download_button(
-                    label=f"📄 Download Printable PDF ({num_cards} Card{'s' if num_cards > 1 else ''})",
-                    data=pdf_data,
-                    file_name="wildlife_board_bingo_set.pdf",
-                    mime="application/pdf"
-                )
+            # Preview Card #1
+            st.subheader("Card #1 Preview")
+            html_grid = ['<div class="bingo-grid">']
+            for letter in ["B", "I", "N", "G", "O"]:
+                html_grid.append(f'<div class="bingo-header">{letter}</div>')
+            for r_i, row in enumerate(generated_matrices[0]):
+                for c_i, cell in enumerate(row):
+                    if r_i == 2 and c_i == 2:
+                        html_grid.append('<div class="bingo-cell bingo-free">FREE SPACE<br/><small>Timer Beep</small></div>')
+                    else:
+                        html_grid.append(f'<div class="bingo-cell">{cell}</div>')
+            html_grid.append('</div>')
 
-            except Exception as e:
-                st.error(f"Something went wrong: {e}")
+            st.markdown("".join(html_grid), unsafe_allow_html=True)
+
+            # Download Multipage PDF
+            pdf_data = create_multi_card_pdf(generated_matrices, selected_date)
+            st.download_button(
+                label=f"📄 Download Printable PDF ({num_cards} Card{'s' if num_cards > 1 else ''})",
+                data=pdf_data,
+                file_name=f"utah_wildlife_bingo_{selected_date}.pdf",
+                mime="application/pdf"
+            )
+
+        except Exception as e:
+            st.error(f"Something went wrong: {e}")
