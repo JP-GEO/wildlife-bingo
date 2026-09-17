@@ -97,70 +97,71 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 st.title("🏔️ Utah Wildlife Board Bingo")
-st.write("Generates instant 5x5 Bingo cards automatically using official meeting documents from Utah DWR.")
+st.write("Generates instant 5x5 Bingo cards automatically using official meeting agendas, packets, and feedback from Utah DWR.")
 
 # Secrets Validation
 if "GEMINI_API_KEY" not in st.secrets:
     st.error("Missing Gemini API Key in Streamlit Secrets!")
     st.stop()
 
-# Flexibly extract date text or region context from surrounding HTML
+# Helper function to extract flexible date/context string
 def extract_flexible_date(text_context):
-    # Regex pattern to grab months, days, years, or multi-day ranges (e.g. Sept 10-15, 2026)
     pattern = r'(?:\b(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*\s+\d{1,2}(?:\s*[-–&]\s*\d{1,2})?,?\s*(?:\d{4})?)|(?:\d{1,2}[-/\.]\d{1,2}[-/\.]\d{2,4})'
     match = re.search(pattern, text_context, re.IGNORECASE)
     if match:
         return match.group(0).strip()
     return None
 
-# 1. DOCUMENT-FIRST SCRAPER WORKFLOW
+# 1. SCRAPER FILTERED STRICTLY TO AGENDA / PACKET / FEEDBACK
 @st.cache_data(ttl=43200)
-def discover_all_meeting_documents():
+def discover_filtered_meeting_documents():
     headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
     documents_map = {}
+    target_keywords = ["agenda", "packet", "feedback"]
     
     try:
         response = requests.get(UTAH_MEETINGS_URL, headers=headers, timeout=10)
         if response.status_code == 200:
             soup = BeautifulSoup(response.content, "html.parser")
             
-            # Find all PDF links on the page
             for a_tag in soup.find_all("a", href=True):
                 href = a_tag["href"]
                 href_lower = href.lower()
                 link_text = a_tag.text.strip()
+                link_text_lower = link_text.lower()
                 
+                # Check 1: Must be a PDF
                 if href_lower.endswith(".pdf"):
-                    full_url = href if href.startswith("http") else f"https://wildlife.utah.gov{href}"
+                    combined_target = f"{href_lower} {link_text_lower}"
                     
-                    # Look at immediate parent container and preceding headings for date clues
-                    parent = a_tag.find_parent(["tr", "li", "p", "div"])
-                    parent_text = parent.text.strip() if parent else ""
-                    heading = a_tag.find_previous(["h2", "h3", "h4"])
-                    heading_text = heading.text.strip() if heading else ""
-                    
-                    # Combine context to find date
-                    combined_context = f"{link_text} {parent_text} {heading_text} {href}"
-                    detected_date = extract_flexible_date(combined_context)
-                    
-                    # Determine Document Label
-                    doc_label = link_text if len(link_text) > 4 else "Meeting PDF"
-                    
-                    # Construct clean display key for the dropdown
-                    if detected_date:
-                        display_key = f"📅 {detected_date} — {doc_label}"
-                    elif heading_text:
-                        display_key = f"📌 {heading_text[:30]} — {doc_label}"
-                    else:
-                        display_key = f"📄 {doc_label}"
+                    # Check 2: MUST contain agenda, packet, or feedback in title/URL
+                    if any(kw in combined_target for kw in target_keywords):
+                        full_url = href if href.startswith("http") else f"https://wildlife.utah.gov{href}"
                         
-                    documents_map[display_key] = full_url
+                        parent = a_tag.find_parent(["tr", "li", "p", "div"])
+                        parent_text = parent.text.strip() if parent else ""
+                        heading = a_tag.find_previous(["h2", "h3", "h4"])
+                        heading_text = heading.text.strip() if heading else ""
+                        
+                        combined_context = f"{link_text} {parent_text} {heading_text} {href}"
+                        detected_date = extract_flexible_date(combined_context)
+                        
+                        doc_label = link_text if len(link_text) > 3 else "Document"
+                        
+                        if detected_date:
+                            display_key = f"📅 {detected_date} — {doc_label}"
+                        elif heading_text:
+                            display_key = f"📌 {heading_text[:30]} — {doc_label}"
+                        else:
+                            display_key = f"📄 {doc_label}"
+                            
+                        documents_map[display_key] = full_url
 
     except Exception:
         pass
     
     if not documents_map:
-        documents_map["📅 Current Meeting Schedule — Agenda PDF"] = "https://wildlife.utah.gov/pdf/meetings/2026_schedule.pdf"
+        documents_map["📅 Current Meeting — Agenda PDF"] = "https://wildlife.utah.gov/pdf/meetings/2026_schedule.pdf"
         
     return documents_map
 
@@ -286,17 +287,17 @@ def create_multi_card_pdf(matrices_list, doc_title):
     return buffer
 
 # --- UI LAYOUT ---
-doc_options = discover_all_meeting_documents()
+doc_options = discover_filtered_meeting_documents()
 
 c1, c2 = st.columns([4, 1])
 with c1:
-    st.subheader("1. Select Meeting Document")
+    st.subheader("1. Select Agendas, Packets & Feedback")
 with c2:
     if st.button("🔄 Refresh"):
         st.cache_data.clear()
         st.rerun()
 
-# Dropdown showing every discovered document with inferred date/heading
+# Dropdown filtering strictly to agenda/packet/feedback PDFs
 selected_doc_title = st.selectbox("Choose a meeting document from Utah DWR:", list(doc_options.keys()))
 selected_pdf_url = doc_options[selected_doc_title]
 
@@ -305,7 +306,7 @@ pdf_bytes = download_pdf_bytes(selected_pdf_url)
 
 if pdf_bytes:
     st.download_button(
-        label="📥 Download Original PDF",
+        label="📥 Download Selected PDF",
         data=pdf_bytes,
         file_name="selected_utah_dwr_document.pdf",
         mime="application/pdf"
@@ -313,10 +314,10 @@ if pdf_bytes:
     document_text = extract_pdf_text_from_bytes(pdf_bytes)
 else:
     document_text = ""
-    st.info("Could not fetch document preview.")
+    st.info("Could not fetch document content.")
 
 # Fallback Upload Option
-with st.expander("➕ Optional: Add Local Agenda PDF"):
+with st.expander("➕ Optional: Add Local PDF File"):
     custom_pdf = st.file_uploader("Upload a local PDF file instead", type=["pdf"])
     if custom_pdf:
         custom_text = extract_pdf_text_from_bytes(custom_pdf.read())
