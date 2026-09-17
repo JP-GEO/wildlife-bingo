@@ -18,8 +18,8 @@ st.set_page_config(page_title="Utah Wildlife Board Bingo", layout="centered")
 
 UTAH_MEETINGS_URL = "https://wildlife.utah.gov/meetings"
 
-# --- HARDCODED TROPES ---
-HARDCODED_CORE_TROPES = [
+# --- CORE PUBLIC BOARD TROPES (Guaranteed across cards, but positioned randomly) ---
+CORE_BOARD_TROPES = [
     "\"Can you hear me now?\"",
     "<b>Interrupted mid-sentence</b>",
     "<b>Unsolicited history lesson</b>",
@@ -28,25 +28,6 @@ HARDCODED_CORE_TROPES = [
     "<b>Speaker starts tearing up</b>",
     "<b>***Technical difficulties***</b>",
     "\"With all due respect...\""
-]
-
-FALLBACK_AI_TROPES = [
-    "<b>I dont have those numbers</b>",
-    "\"I have a quick question\"",
-    "<b>Dog hunting debate</b>",
-    "<b>Public commenter over time</b>",
-    "<b>Slide deck unreadable</b>",
-    "\"Back in the good old days\"",
-    "<b>Bag limit adjustment</b>",
-    "<b>...family hunting anecdote...</b>",
-    "\"We need to look that up\"",
-    "<b>Boat ramp access fees</b>",
-    "<b>Dramatic sigh in mic</b>",
-    "\"I move to approve\"",
-    "<b>I second the motion</b>",
-    "\"Is this item open?\"",
-    "<b>Background *coughing*</b>",
-    "<b>Presenter mixes up their slides</b>"
 ]
 
 # High-contrast Black & White Styling
@@ -97,27 +78,20 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 st.title("🏔️ Utah Wildlife Board Bingo")
-st.write("Generates instant 5x5 Bingo cards using official meeting agendas, packets, and feedback from Utah DWR.")
+st.write("Generates balanced, unique 5x5 Bingo cards from official Utah DWR meeting documents.")
 
-# API Key Check
 if "GEMINI_API_KEY" not in st.secrets:
     st.error("Missing Gemini API Key in Streamlit Secrets!")
     st.stop()
 
-# Helper function to extract dates from text or URLs
 def extract_date_from_string(text):
     date_match = re.search(r'(?:\b(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*\s+\d{1,2}(?:st|nd|rd|th)?,?\s+\d{4})|(?:\d{4}[-_\.]\d{2}[-_\.]\d{2})|(?:\d{1,2}[-_\.]\d{1,2}[-_\.]\d{2,4})', text, re.IGNORECASE)
-    if date_match:
-        return date_match.group(0)
-    return "Upcoming / General Meetings"
+    return date_match.group(0) if date_match else "Upcoming / General Meetings"
 
-# 1. DATE-GROUPED SCRAPER FOR AGENDAS, PACKETS & FEEDBACK
 @st.cache_data(ttl=43200)
 def discover_utah_docs_by_date():
     headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
-    # Structure: { "Date String": { "Agenda": url, "Packet": url, "Feedback": url } }
     grouped_dates = {}
-    
     try:
         response = requests.get(UTAH_MEETINGS_URL, headers=headers, timeout=10)
         if response.status_code == 200:
@@ -146,15 +120,9 @@ def discover_utah_docs_by_date():
                         grouped_dates[detected_date][doc_type] = full_url
     except Exception:
         pass
-    
-    if not grouped_dates:
-        grouped_dates["Default Board Meeting"] = {
-            "Agenda": "https://wildlife.utah.gov/pdf/meetings/2026_schedule.pdf"
-        }
         
     return grouped_dates
 
-# Download raw binary for direct document downloading
 def download_pdf_bytes(pdf_url):
     headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
     try:
@@ -165,22 +133,20 @@ def download_pdf_bytes(pdf_url):
         pass
     return None
 
-# Extract text from PDF bytes
 def extract_pdf_text_from_bytes(pdf_bytes):
     try:
         pdf_file = io.BytesIO(pdf_bytes)
         reader = pypdf.PdfReader(pdf_file)
         extracted_text = ""
-        max_pages = min(len(reader.pages), 5)
+        max_pages = min(len(reader.pages), 8)
         for i in range(max_pages):
             text = reader.pages[i].extract_text()
             if text:
                 extracted_text += text + "\n"
-        return extracted_text[:3000]
+        return extracted_text[:6000]
     except Exception:
         return ""
 
-# Retry Wrapper for Gemini API
 @retry(
     wait=wait_random_exponential(min=1, max=10),
     stop=stop_after_attempt(3),
@@ -192,7 +158,6 @@ def call_gemini_with_retry(client, prompt):
         contents=prompt,
     )
 
-# PDF Creator
 def create_multi_card_pdf(matrices_list, doc_title):
     buffer = io.BytesIO()
     doc = SimpleDocTemplate(
@@ -279,16 +244,13 @@ def create_multi_card_pdf(matrices_list, doc_title):
     buffer.seek(0)
     return buffer
 
-# Discover grouped documents by date
 grouped_docs = discover_utah_docs_by_date()
 
-# UI Layout
 st.subheader("1. Select Meeting Date")
-selected_date = st.selectbox("Choose meeting date:", list(grouped_docs.keys()))
-available_files = grouped_docs[selected_date]
+selected_date = st.selectbox("Choose meeting date:", list(grouped_docs.keys())) if grouped_docs else "Upcoming Meetings"
+available_files = grouped_docs.get(selected_date, {})
 
-# File Download Options for User
-st.subheader("2. Available Source Documents for Selected Date")
+st.subheader("2. Source Documents for Selected Date")
 cols = st.columns(3)
 
 file_texts = []
@@ -314,57 +276,73 @@ combined_date_text = "\n\n".join(file_texts)
 st.subheader("3. Card Quantity")
 num_cards = st.number_input("How many unique Bingo cards do you want to generate?", min_value=1, max_value=20, value=1, step=1)
 
-# Generation Action
-if st.button("🎲 Generate Bingo Cards", type="primary"):
-    with st.spinner(f"Analyzing all documents for {selected_date} and generating {num_cards} card(s)..."):
+if st.button("🎲 Generate Unique Bingo Cards", type="primary"):
+    with st.spinner("Extracting agenda details and building balanced card sets..."):
         try:
             client = genai.Client(api_key=st.secrets["GEMINI_API_KEY"])
 
-            ai_phrases = []
-            if combined_date_text.strip():
-                prompt = f"""
-                You are generating bingo cards for Utah Wildlife Board / RAC meetings.
-                Analyze this combined text extracted from official meeting documents for {selected_date}:
-                
-                {combined_date_text[:4000]}
+            prompt = f"""
+            You are generating a large pool of phrases for Utah Wildlife Board meeting bingo cards.
+            Analyze these official meeting documents for {selected_date}:
+            
+            {combined_date_text[:5000]}
 
-                Generate EXACTLY 16 BROADER, SHORT, EASY-TO-TRIGGER phrases (max 2-4 words each) based on topics in this agenda/packet or common public comment habits.
-                
-                CRITICAL FORMATTING RULES:
-                1. If spoken/yelled out by a person, wrap in quotes: "Spoken Phrase"
-                2. If an action, general topic, or fact, wrap in bold: <b>Action or Topic</b>
-                
-                Return ONLY a raw JSON array of 16 strings.
-                """
+            Generate EXACTLY 40 SHORT, DISTINCT, EASY-TO-TRIGGER phrases (2-5 words max) specific to topics, species, regulations, regions, or public comments found in this text.
 
-                response = call_gemini_with_retry(client, prompt)
-                
-                if response and hasattr(response, 'text') and response.text:
-                    try:
-                        raw_json = response.text.strip().replace("```json", "").replace("```", "")
-                        parsed_list = json.loads(raw_json)
-                        if isinstance(parsed_list, list):
-                            ai_phrases = parsed_list
-                    except Exception:
-                        ai_phrases = FALLBACK_AI_TROPES
-                else:
-                    ai_phrases = FALLBACK_AI_TROPES
-            else:
-                ai_phrases = FALLBACK_AI_TROPES
+            FORMATTING RULES:
+            1. If spoken by a commenter or board member, wrap in quotes: "Spoken Phrase"
+            2. If an action, regulation topic, or agenda item, wrap in bold: <b>Action or Topic</b>
 
-            # Safely calculate missing phrase count using int conversion
-            needed = 16 - len(ai_phrases)
-            if needed > 0:
-                ai_phrases.extend(FALLBACK_AI_TROPES[:needed])
+            Return ONLY a raw JSON array of 40 strings.
+            Example: ["\"I oppose this\"", "<b>Elk permit limits</b>", "<b>CWD testing debate</b>", "\"Quick clarification\""]
+            """
 
-            all_phrases_pool = HARDCODED_CORE_TROPES + ai_phrases
+            response = call_gemini_with_retry(client, prompt)
+            
+            ai_pool = []
+            if response and hasattr(response, 'text') and response.text:
+                try:
+                    raw_json = response.text.strip().replace("```json", "").replace("```", "")
+                    parsed = json.loads(raw_json)
+                    if isinstance(parsed, list):
+                        ai_pool = [str(x) for x in parsed if isinstance(x, str)]
+                except Exception:
+                    pass
 
-            # Generate N unique matrices
+            # Ensure the pool is large enough for true combination sampling
+            if len(ai_pool) < 25:
+                st.warning("Agenda text was brief; adding general wildlife topics to expand card variety.")
+                extra_pool = [
+                    "<b>CWD management plan</b>", "<b>Big game permit quotas</b>", "<b>Water rights discussion</b>",
+                    "<b>Regional Advisory Council vote</b>", "<b>Public comment timer beep</b>", "<b>Cougar hunting limits</b>",
+                    "<b>Habitat restoration grant</b>", "<b>Aquatic invasive species</b>", "<b>Shed hunting season</b>",
+                    "<b>Trail camera ban debate</b>", "\"I have a quick comment\"", "<b>Walk-in access program</b>",
+                    "<b>Conservation officer update</b>", "\"I move to approve\"", "<b>Public comment over time</b>"
+                ]
+                ai_pool.extend(extra_pool)
+
+            # Deduplicate while preserving order
+            unique_ai_pool = list(dict.fromkeys(ai_pool))
+
+            # Build cards using random.sample for combination diversity
             generated_matrices = []
-            for i in range(int(num_cards)):
-                current_pool = list(all_phrases_pool[:24])
-                random.shuffle(current_pool)
+            card_count = int(num_cards)
+
+            for _ in range(card_count):
+                # Sample 16 unique items from the AI topic pool
+                needed_ai = min(16, len(unique_ai_pool))
+                ai_sample = random.sample(unique_ai_pool, needed_ai)
                 
+                # Combine with core tropes and shuffle positions
+                card_phrases = list(CORE_BOARD_TROPES[:8]) + ai_sample
+                
+                # Top off to 24 if pool was small
+                if len(card_phrases) < 24:
+                    fill_items = [p for p in unique_ai_pool if p not in card_phrases]
+                    card_phrases.extend(fill_items[:(24 - len(card_phrases))])
+
+                random.shuffle(card_phrases)
+
                 matrix = []
                 idx = 0
                 for r in range(5):
@@ -373,14 +351,13 @@ if st.button("🎲 Generate Bingo Cards", type="primary"):
                         if r == 2 and c == 2:
                             row.append("FREE SPACE")
                         else:
-                            row.append(current_pool[idx])
+                            row.append(card_phrases[idx])
                             idx += 1
                     matrix.append(row)
                 generated_matrices.append(matrix)
 
-            st.success(f"{num_cards} Bingo Card(s) Ready!")
+            st.success(f"{num_cards} Unique Bingo Card(s) Generated!")
 
-            # Preview Card #1
             st.subheader("Card #1 Preview")
             html_grid = ['<div class="bingo-grid">']
             for letter in ["B", "I", "N", "G", "O"]:
@@ -395,7 +372,6 @@ if st.button("🎲 Generate Bingo Cards", type="primary"):
 
             st.markdown("".join(html_grid), unsafe_allow_html=True)
 
-            # Download Multipage PDF
             pdf_data = create_multi_card_pdf(generated_matrices, selected_date)
             st.download_button(
                 label=f"📄 Download Printable PDF ({num_cards} Card{'s' if num_cards > 1 else ''})",
