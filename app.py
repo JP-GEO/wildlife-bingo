@@ -17,10 +17,9 @@ from tenacity import retry, stop_after_attempt, wait_random_exponential
 st.set_page_config(page_title="Wildlife Board Bingo", layout="centered")
 
 # --- HARDCODED BACKEND CONFIGURATION ---
-# Default agenda PDF fetched automatically behind the scenes
 DEFAULT_AGENDA_URL = "https://wildlife.utah.gov/pdf/meetings/board/2026-09-17-board-packet.pdf"
 
-# Guaranteed classic tropes scattered across every generated card
+# 8 Guaranteed Core Tropes
 HARDCODED_CORE_TROPES = [
     "\"Can you hear me now?\"",
     "<b>Public comment timer beep</b>",
@@ -30,6 +29,26 @@ HARDCODED_CORE_TROPES = [
     "<b>Board member food coma</b>",
     "<b>Unanimous vote in < 5 sec</b>",
     "\"With all due respect...\""
+]
+
+# 16 Fallback Tropes in case AI response is empty or blocked
+FALLBACK_AI_TROPES = [
+    "<b>CWD regulations discussed</b>",
+    "\"I have a quick question\"",
+    "<b>Dog hunting debate</b>",
+    "<b>Public commenter over time</b>",
+    "<b>Slide deck unreadable</b>",
+    "\"Back in the good old days\"",
+    "<b>Bag limit adjustment</b>",
+    "<b>Water rights rant</b>",
+    "\"We need more study\"",
+    "<b>Boat ramp access fees</b>",
+    "<b>Dramatic sigh in mic</b>",
+    "\"I move to approve\"",
+    "<b>Secret spot described</b>",
+    "\"Is this item open?\"",
+    "<b>Accidental background bark</b>",
+    "<b>Presenter skips 20 slides</b>"
 ]
 
 # High-contrast Black & White styling
@@ -101,7 +120,6 @@ def get_agenda_content_and_date(url):
                 if t:
                     text += t + "\n"
                     
-            # Try metadata date first, then HTTP header
             doc_date = None
             if reader.metadata:
                 raw_date = reader.metadata.get('/ModDate') or reader.metadata.get('/CreationDate')
@@ -223,19 +241,16 @@ def create_bw_square_pdf(bingo_matrix, last_updated_str):
 if st.button("🎲 Generate Bingo Card", type="primary"):
     with st.spinner("Fetching latest agenda and crafting card..."):
         try:
-            # 1. Fetch agenda behind the scenes
             agenda_text, last_updated_date = get_agenda_content_and_date(DEFAULT_AGENDA_URL)
-            
-            # 2. Call Gemini for easy-to-trigger agenda phrases
             client = genai.Client(api_key=st.secrets["GEMINI_API_KEY"])
             
             prompt = f"""
             You are generating bingo cards for a state Board of Wildlife Resources meeting.
             Analyze the following meeting agenda:
             
-            {agenda_text}
+            {agenda_text[:4000]}
 
-            Generate EXACTLY 16 BROADER, SHORT, EASY-TO-TRIGGER phrases (max 2-4 words each) based on the topics in this agenda or common public comment habits. Keep them high-level so attendees get Bingo easily!
+            Generate EXACTLY 16 BROADER, SHORT, EASY-TO-TRIGGER phrases (max 2-4 words each) based on the topics in this agenda or common public comment habits.
             
             CRITICAL FORMATTING RULES:
             1. If spoken/yelled out by a person, wrap in quotes: "Spoken Phrase"
@@ -246,15 +261,28 @@ if st.button("🎲 Generate Bingo Card", type="primary"):
             """
 
             response = call_gemini_with_retry(client, prompt)
-            raw_json = response.text.strip().replace("```json", "").replace("```", "")
-            ai_phrases = json.loads(raw_json)
+            
+            # Safe extraction check
+            ai_phrases = []
+            if response and hasattr(response, 'text') and response.text:
+                try:
+                    raw_json = response.text.strip().replace("```json", "").replace("```", "")
+                    ai_phrases = json.loads(raw_json)
+                except Exception:
+                    ai_phrases = FALLBACK_AI_TROPES
+            else:
+                ai_phrases = FALLBACK_AI_TROPES
 
-            # 3. Combine 8 Hardcoded Core Tropes + 16 AI Agenda Phrases
+            # Fallback if fewer than 16 phrases returned
+            if len(ai_phrases) < 16:
+                ai_phrases.extend(FALLBACK_AI_TROPES[:(16 - len(ai_phrases))])
+
+            # Combine 8 Hardcoded Core Tropes + 16 AI Agenda Phrases
             all_phrases = HARDCODED_CORE_TROPES + ai_phrases
             selected_phrases = all_phrases[:24]
             random.shuffle(selected_phrases)
 
-            # 4. Build 5x5 Matrix
+            # Build 5x5 Matrix
             matrix = []
             idx = 0
             for r in range(5):
@@ -269,7 +297,7 @@ if st.button("🎲 Generate Bingo Card", type="primary"):
 
             st.success(f"Bingo Card Ready! (Agenda Updated: {last_updated_date})")
 
-            # 5. On-Screen Preview
+            # On-Screen Preview
             html_grid = ['<div class="bingo-grid">']
             for letter in ["B", "I", "N", "G", "O"]:
                 html_grid.append(f'<div class="bingo-header">{letter}</div>')
@@ -283,7 +311,7 @@ if st.button("🎲 Generate Bingo Card", type="primary"):
 
             st.markdown("".join(html_grid), unsafe_allow_html=True)
 
-            # 6. Download PDF
+            # Download PDF
             pdf_data = create_bw_square_pdf(matrix, last_updated_date)
             st.download_button(
                 label="📄 Download Printable PDF",
